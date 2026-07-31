@@ -137,12 +137,12 @@ test('INSTANCE_ID falls back to the hostname, then to "unknown"', () => {
 test('this service reads exactly one database variable', () => {
   // Rule 1, asserted in a test as well as in CI. The answer to needing another service's data is
   // an HTTP call typed by a published contract, never a second DSN.
-  // The foreign variable's name is assembled rather than written out. `micro-org`'s rule-1 check
-  // greps `src/` for the pattern and cannot tell a variable this service READS from one a test
-  // proves it IGNORES — so spelling it here would fail the build that this test agrees with.
-  // Recorded in README.md under "Findings against micro-org".
-  const foreignDsnVar = ['LEDGER', 'DATABASE', 'URL'].join('_')
-  const source = withEnv({ [foreignDsnVar]: 'postgres://elsewhere/ledger' })
+  // The foreign variable used to be assembled from parts here rather than written out, because
+  // `micro-org`'s rule-1 check scanned test files too and could not tell a variable this service
+  // READS from one a test proves it IGNORES — so spelling it failed the build that this very test
+  // agrees with. The check now excludes tests, as its sibling hard-coded-DSN check always did, so
+  // the name is written plainly and the assertion says what it means.
+  const source = withEnv({ LEDGER_DATABASE_URL: 'postgres://elsewhere/ledger' })
   const env = loadEnv(source)
   assert.equal(env.databaseUrl, REQUIRED['MARKET_DATABASE_URL'])
   assert.ok(!Object.values(env).includes('postgres://elsewhere/ledger'))

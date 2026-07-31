@@ -145,7 +145,7 @@ repository calls, and each one made a check red for a repository that was actual
    `[A-Z][A-Z0-9_]*_(DATABASE_URL|DB_URL|POSTGRES_URL)` and fails on anything that is not the one
    declared database variable — so the `<service>_test_database_url` name that `worlds`, `wallet`,
    `studio` and `settlement` all use would fail it. This repository names its test variable
-   `MARKET_TEST_DSN` to stay green, which is the cheap half of the fix; the other half belongs in
+   `MARKET_TEST_DATABASE_URL` to stay green, which is the cheap half of the fix; the other half belongs in
    `micro-org`.
 
 3. **That same check matches prose and test fixtures, not declarations.** Two consequences here.
@@ -195,7 +195,7 @@ scripts/
 `node:test` against a real Postgres. **275 tests, zero skipped.**
 
 ```
-MARKET_TEST_DSN=postgres://…/market_test pnpm test
+MARKET_TEST_DATABASE_URL=postgres://…/market_test pnpm test
 ```
 
 The database-backed cases run against the real `MIGRATIONS` rather than a fixture schema,

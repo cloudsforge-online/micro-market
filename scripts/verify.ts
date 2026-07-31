@@ -21,7 +21,7 @@
  * side-car below, so the transcript shows the state transition rather than a race against a
  * printer. In production that same call is a job claimed under a lease.
  *
- *     MARKET_TEST_DSN=postgres://…/market_test pnpm verify
+ *     MARKET_TEST_DATABASE_URL=postgres://…/market_test pnpm verify
  */
 
 import { createServer as createHttpServer } from 'node:http'

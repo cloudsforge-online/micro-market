@@ -222,24 +222,26 @@ export function fakePolicy(): FakePolicy {
 /* ------------------------------------------------------------------ the database harness */
 
 /**
- * `MARKET_TEST_DSN`, and not the `market_test_database_url` every sibling uses.
+ * `MARKET_TEST_DATABASE_URL`, as in every sibling.
  *
- * Not a preference. `micro-org`'s reusable rule-1 check greps `src/` for a `*_database_url`-shaped
- * name and fails on every one that is not the single declared database variable — so a test-only
- * DSN named in the estate's own house style fails the estate's own CI. `micro-trade` hit this
- * first and named its variable `TRADE_TEST_DSN` for the same reason.
+ * It was briefly `MARKET_TEST_DSN`, following `micro-trade`, to dodge two defects in `micro-org`'s
+ * reusable rule-1 check: it compared reads against the one declared database variable by exact
+ * string, so a service's own test DSN counted as another service's database, and it grepped raw
+ * source, so a comment explaining the rejection failed the build by spelling the rejected name.
+ * Both are fixed upstream — the rule compares namespaces and strips comments first — so the
+ * workaround is gone.
  *
- * The name in the sentence above is written in lower case for the same reason `micro-trade` writes
- * its note that way: the check matches prose, so a comment explaining why the name is rejected
- * fails the build if it spells the name. Recorded in README.md under "Findings against micro-org";
- * the other half of the fix — an exemption for a test-only name — belongs there.
+ * Reverting it was not tidying. CI exports the DSN as `<SERVICE>_TEST_DATABASE_URL`; a suite
+ * reading a differently-spelled variable would not have found it, would have skipped every
+ * database-backed test, and would have gone green — which is the exact failure the upstream fix
+ * was made to end.
  */
-const url = process.env['MARKET_TEST_DSN']
+const url = process.env['MARKET_TEST_DATABASE_URL']
 
 /** Both halves are required: a URL, and a URL that names a test database. */
 export const enabled = Boolean(url && /test/i.test(url))
 
-export const skip = enabled ? false : 'set MARKET_TEST_DSN (name must contain "test")'
+export const skip = enabled ? false : 'set MARKET_TEST_DATABASE_URL (name must contain "test")'
 
 export function openDb(max = 8): postgres.Sql {
   if (!enabled) throw new Error('database tests are disabled')

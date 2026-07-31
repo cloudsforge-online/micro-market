@@ -112,16 +112,16 @@ jobs:
       - name: Test
         working-directory: market
         env:
-          MARKET_TEST_DSN: postgres://market:market@127.0.0.1:5432/market_test
+          MARKET_TEST_DATABASE_URL: postgres://market:market@127.0.0.1:5432/market_test
         run: pnpm test
 
-      # A skip is never counted as a pass (docs/ecosystem/14 §16). If MARKET_TEST_DSN failed to
+      # A skip is never counted as a pass (docs/ecosystem/14 §16). If MARKET_TEST_DATABASE_URL failed to
       # reach the suite, every database-backed case would silently skip and the job would still be
       # green — which would hide the loss of every concurrency proof in the repository.
       - name: No test was skipped
         working-directory: market
         env:
-          MARKET_TEST_DSN: postgres://market:market@127.0.0.1:5432/market_test
+          MARKET_TEST_DATABASE_URL: postgres://market:market@127.0.0.1:5432/market_test
         run: |
           set -uo pipefail
           output=$(pnpm test 2>&1) || { echo "$output"; exit 1; }
