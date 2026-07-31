@@ -9,16 +9,16 @@ name: CI
 # measured target in docs/ecosystem/03 §5 is zero bespoke CI files, and calling it is how this
 # repository counts toward that zero rather than against it.
 #
-# `database` is the part the reusable workflow cannot do yet, and it is a gap in micro-org rather
-# than a preference here: `service-ci.yml`'s build job has **no Postgres service container**, so a
-# suite that tests against a real database cannot run in it. This repository's suite is 275 tests and
-# most of them touch Postgres — including every proof that two workers cannot sell one item twice,
-# settle one auction twice, release one escrow twice or pay one order out twice, which is the entire
-# reason the service exists. Running those against a fixture would be running them against the
-# fixture.
+# `database` was written when `service-ci.yml` had no Postgres service container. The reusable
+# workflow now provides one and fails the build if the database suite skipped, so the suite runs
+# there too — what `database` still adds that the reusable workflow does not is the migrator
+# exercised AS a migrator, on an empty database, exactly as a deploy runs it.
 #
-# **Delete `database` the day `service-ci.yml` gains a `postgres-service` input.** The findings are
-# recorded in README.md under "Findings against micro-org"; this file is one of them.
+# There is no bespoke `image` job any more. The reusable workflow's image job passes the
+# `runtimepkgs`/`contractspkgs` build contexts itself, gives the container a real migrated
+# Postgres over host networking, and reads /livez — everything the bespoke job did, plus the
+# database it never had (its smoke test pointed the container at 127.0.0.1:5432/ci, an address
+# where nothing listened under bridge networking and a database that never existed).
 
 on:
   push:
@@ -39,11 +39,18 @@ jobs:
       service: market
       database-env-var: MARKET_DATABASE_URL
       port: 4000
-      # The image build needs two extra build contexts for the unpublished sibling packages (see
-      # the Dockerfile header), and `service-ci.yml` has no input for them. Building it here would
-      # fail on a COPY from a context that was never passed, so the image is proved by the
-      # `image` job below instead — with the contexts.
-      build-image: false
+      # The image startup smoke test boots the real service, and `env.ts` validates its
+      # configuration at import — so the container needs the variables it declares, not just a
+      # database. CI-only NON-secrets: throwaway tokens that clear a length check, URLs that are
+      # never dialled because /livez needs no upstream. Never a real credential.
+      smoke-env: |
+        IDENTITY_JWKS_URL=http://127.0.0.1:4001/.well-known/jwks.json
+        IDENTITY_ISSUER=http://127.0.0.1:4001
+        OUTBOX_SIGNING_SECRET=ci-only-not-a-real-secret-000000000000
+        LEDGER_URL=http://127.0.0.1:4007
+        INDEXER_URL=http://127.0.0.1:4004
+        POLICY_URL=http://127.0.0.1:4011
+        MARKET_SERVICE_TOKEN=ci-only-not-a-real-token-0000000000000
     secrets:
       # @cloudsforge/* resolves via link:../runtime, so the workflow checks out micro-runtime
       # and micro-contracts as siblings — both private, hence a contents:read token.
@@ -87,6 +94,16 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: market/pnpm-lock.yaml
+
+      # `link:` resolves to the sibling's own node_modules, so the siblings must be installed
+      # before this repository is — without this, `tsc` cannot resolve the sibling source it
+      # typechecks (jose, @opentelemetry/api, @cloudsforge/contracts-chain) and `tsx` cannot load
+      # @cloudsforge/* at run time.
+      - name: Install the sibling runtime and contracts
+        run: |
+          set -euo pipefail
+          pnpm --dir runtime install --frozen-lockfile
+          pnpm --dir contracts install --frozen-lockfile
 
       - name: Install
         working-directory: market
@@ -132,69 +149,6 @@ jobs:
           skipped=$(printf '%s\n' "$output" | grep -oE '^# skipped [0-9]+$' | grep -oE '[0-9]+' || echo 0)
           echo "skipped: ${skipped:-0}"
           [ "${skipped:-0}" = "0" ] || { echo "::error::${skipped} tests were skipped"; exit 1; }
-
-  image:
-    name: The image builds, starts, and answers /livez
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: { path: market }
-      - uses: actions/checkout@v4
-        with: { repository: cloudsforge-online/micro-runtime, path: runtime, token: "${{ secrets.ESTATE_READ_TOKEN }}" }
-      - uses: actions/checkout@v4
-        with: { repository: cloudsforge-online/micro-contracts, path: contracts, token: "${{ secrets.ESTATE_READ_TOKEN }}" }
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build
-        uses: docker/build-push-action@v6
-        with:
-          context: market
-          # The two named contexts the Dockerfile documents. They disappear with AD-02.
-          build-contexts: |
-            runtimepkgs=runtime
-            contractpkgs=contracts
-          push: false
-          load: true
-          tags: market:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # A built image proves the Dockerfile parses. It does not prove the image can start, and
-      # 'container is unhealthy' with no logs is the shape of silent failure this estate has been
-      # bitten by more than once. So: start it, and read the endpoint the load balancer reads.
-      #
-      # /livez is deliberately the endpoint checked, not /readyz: /readyz probes Postgres, JWKS and
-      # the ledger, none of which exist in this job. That /livez is static and /readyz is not is
-      # exactly the property being relied on here.
-      - name: Start it
-        run: |
-          set -euo pipefail
-          docker run -d --name ci-market -p 127.0.0.1:4000:4000 \
-            -e PORT=4000 \
-            -e MARKET_DATABASE_URL=postgres://ci:ci@127.0.0.1:5432/ci \
-            -e IDENTITY_JWKS_URL=http://127.0.0.1:4001/.well-known/jwks.json \
-            -e IDENTITY_ISSUER=http://127.0.0.1:4001 \
-            -e OUTBOX_SIGNING_SECRET=ci-only-not-a-real-secret-000000000000 \
-            -e LEDGER_URL=http://127.0.0.1:4007 \
-            -e INDEXER_URL=http://127.0.0.1:4004 \
-            -e POLICY_URL=http://127.0.0.1:4011 \
-            -e MARKET_SERVICE_TOKEN=ci-only-not-a-real-token-0000000000000 \
-            market:ci
-          for attempt in $(seq 1 30); do
-            code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:4000/livez || true)
-            [ "$code" = "200" ] && { echo "ok: /livez answered after ${attempt}s"; exit 0; }
-            sleep 1
-          done
-          echo '::error::the image never answered /livez'
-          docker logs --tail 60 ci-market
-          exit 1
-
-      - name: Logs on failure
-        if: failure()
-        run: docker logs --tail 100 ci-market || true
-      - name: Down
-        if: always()
-        run: docker rm -f ci-market || true
 
   rules:
     name: The controls this service exists to add
