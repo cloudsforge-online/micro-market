@@ -75,15 +75,63 @@ export function httpPolicyClient(options: PolicyClientOptions): PolicyClient {
   return {
     async evaluateListing(input) {
       try {
-        const body = await client.request<{ decision: PolicyDecision; reasons?: string[] }>(
-          '/v1/decisions/market.listing',
-          { method: 'POST', body: input },
-        )
-        return { decision: body.decision, reasons: body.reasons ?? [], degraded: false }
+        // `POST /decisions`, not `/v1/decisions/market.listing`. Policy has NO `/v1` routes at
+        // all (`policy/src/server.ts:299-541`) and takes the action in the body rather than the
+        // path, so every call this client made returned 404 — and the fail-open branch below
+        // swallowed it as `review` + `degraded`. The gate was therefore not degraded, it was
+        // ABSENT, which is precisely the failure the header above says is worse than either
+        // alternative. Found by micro-foresight while it built its own policy client against
+        // policy's actual route table; same class as the recorded
+        // `wallet/src/pricingclient.ts:75-78`, and the reason consumer-driven contract tests
+        // exist.
+        //
+        // The action is `market.listing.create`, spelled as policy's closed registry spells it
+        // (`policy/src/actions.ts`). An unregistered action is a deliberate 400 rather than a
+        // guess, so `market.listing` would have kept failing even against the right path.
+        const body = await client.request<{
+          decision?: { decision?: string; reasons?: readonly string[] }
+        }>('/decisions', {
+          method: 'POST',
+          body: {
+            subject: input.sellerSubject,
+            action: 'market.listing.create',
+            // A URN rather than a bare id, so a decision row read months later says what it was
+            // about without a lookup table. Policy stores this verbatim.
+            resource: input.itemUrn,
+            context: {
+              // A DECIMAL STRING. Policy rejects a JSON number outright rather than coercing it,
+              // because a threshold comparison on a float is the bug that service exists not to
+              // have (`policy/src/server.ts:667-673`).
+              amount: input.amount,
+              asset: input.assetCode,
+              assetKind: input.assetKind,
+              settlementMode: input.settlementMode,
+            },
+          },
+        })
+
+        // Policy answers 201 with `{decision: {...}}`. A success whose body cannot be read is not
+        // an allow: treating an unparseable 201 as permission would make a response-shape change
+        // silently open the gate.
+        const verdict = body.decision?.decision
+        if (verdict !== 'allow' && verdict !== 'review' && verdict !== 'deny') {
+          return DEGRADED_VERDICT
+        }
+        return { decision: verdict, reasons: [...(body.decision?.reasons ?? [])], degraded: false }
       } catch (err) {
         // A 4xx is policy DECIDING, not policy failing, and a decision is never overridden by a
         // fail-open default — that would turn "deny" into "allow" for any caller that could
         // provoke a 400.
+        // A 404 or 405 is NOT policy deciding — it is policy not having that route, which is a
+        // deployment or client error and says nothing about this listing. Treating it as a
+        // decision is how the broken path above became a 403 on every single listing: `deny` is
+        // honoured at `server.ts:678`, so a misspelled route closed the entire marketplace rather
+        // than leaving it unmoderated. Between "shut the market because we misconfigured
+        // ourselves" and "list it and flag it", this file's header already chose: fail open, and
+        // leave evidence.
+        if (err instanceof HttpError && (err.status === 404 || err.status === 405)) {
+          return DEGRADED_VERDICT
+        }
         if (err instanceof HttpError && err.peerDecided && err.status !== 429) {
           return { decision: 'deny', reasons: ['policy_rejected_the_request'], degraded: false }
         }
