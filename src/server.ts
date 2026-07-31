@@ -994,13 +994,22 @@ function buildRoutes(): Route[] {
       const principal = await authenticate(ctx, deps)
       if (principal.kind === 'service') requireScope(principal, WRITE_SCOPE)
       const body = await readJson(ctx.req)
-      const dispute = await openDispute(deps.moderation, {
-        orderId: itemIdOf(ctx),
-        raiserSubject: subjectOf(principal),
-        reason: requireString(body, 'reason'),
-        correlationId: ctx.requestId,
+      const orderId = itemIdOf(ctx)
+      // Wrapped, like every other mutating route on this service — this one was not, and
+      // `openDispute` is a plain INSERT with no natural-key uniqueness behind it
+      // (`moderation.ts:375`). So a double-clicked button, or any client that retried a request
+      // whose response it never saw, opened TWO disputes on one order and froze the listing
+      // twice. Found by micro-sdk while cataloguing which public routes require an
+      // Idempotency-Key: the answer for this one was "none", and it should never have been.
+      return withIdempotentRoute(ctx, deps, '/v1/orders/:id/disputes', { orderId, ...body }, async () => {
+        const dispute = await openDispute(deps.moderation, {
+          orderId,
+          raiserSubject: subjectOf(principal),
+          reason: requireString(body, 'reason'),
+          correlationId: ctx.requestId,
+        })
+        return { response: { dispute: disputeWire(dispute) }, artefactId: dispute.id }
       })
-      return { status: 201, body: { dispute: disputeWire(dispute) } }
     }),
 
     define('GET', '/v1/disputes', async (ctx, deps) => {
@@ -1056,16 +1065,22 @@ function buildRoutes(): Route[] {
       const principal = await authenticate(ctx, deps)
       requireOperator(principal)
       const body = await readJson(ctx.req)
-      const opened = await openCase(deps.moderation, {
-        subjectKind: requireString(body, 'subjectKind') as CaseSubjectKind,
-        subjectUrn: requireString(body, 'subjectUrn'),
-        listingId: typeof body['listingId'] === 'string' ? body['listingId'] : null,
-        reason: requireString(body, 'reason'),
-        action: (typeof body['action'] === 'string' ? body['action'] : 'none') as CaseAction,
-        openedBy: operatorIdOf(principal),
-        correlationId: ctx.requestId,
+      // `moderation_cases` has no unique constraint, so a retried open makes a second case on one
+      // subject and an operator queue grows duplicates of the thing it exists to surface once.
+      // Same shape as the dispute route above, found while auditing which mutating routes were
+      // unwrapped.
+      return withIdempotentRoute(ctx, deps, '/v1/moderation/cases', body, async () => {
+        const opened = await openCase(deps.moderation, {
+          subjectKind: requireString(body, 'subjectKind') as CaseSubjectKind,
+          subjectUrn: requireString(body, 'subjectUrn'),
+          listingId: typeof body['listingId'] === 'string' ? body['listingId'] : null,
+          reason: requireString(body, 'reason'),
+          action: (typeof body['action'] === 'string' ? body['action'] : 'none') as CaseAction,
+          openedBy: operatorIdOf(principal),
+          correlationId: ctx.requestId,
+        })
+        return { response: { case: opened }, artefactId: opened.id }
       })
-      return { status: 201, body: { case: opened } }
     }),
 
     define('POST', '/v1/moderation/cases/:id/resolve', async (ctx, deps) => {
