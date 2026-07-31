@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": { "noEmit": true },
+  "_include": [
+    "`scripts` as well as `src`. package.json declares a `verify` script, and a script the",
+    "manifest promises but the typechecker never reads is a script that rots silently — it is not",
+    "imported by anything, so nothing else would ever catch it. tsconfig.build.json still emits",
+    "from src/ alone."
+  ],
+  "include": ["src/**/*", "scripts/**/*"]
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# `.env` AND every `.env.<something>`. The single line is not enough: a `.env.local` or a
+# `.env.production` written next to it is exactly as much of a secret and would be committed.
+.env
+.env.*
+!.env.example

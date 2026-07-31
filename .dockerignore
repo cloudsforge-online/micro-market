@@ -1,0 +1,11 @@
+node_modules
+dist
+.git
+.github
+.env
+.env.*
+*.log
+README.md
+scripts
+src/**/*.test.ts
+src/testsupport.ts
