@@ -133,6 +133,15 @@ export interface Env {
   readonly ledgerUrl: string
   /** Soft for risk indicators; hard for confirming an on-chain settlement — 07 §dependency map. */
   readonly indexerUrl: string
+  /**
+   * Which network an escrow transaction is looked for on when the activation does not say.
+   *
+   * The indexer scopes every read by `(chain, network)` and refuses to span them, because XRP
+   * shares one address across testnet and mainnet and a signed Payment is submittable on either.
+   * A hash without a network is therefore not a question the indexer can answer, and a wrong
+   * default here reports "no such transaction" for a transaction that exists.
+   */
+  readonly indexerNetwork: string
   /** Soft, fail-open-and-flag. See `policyclient.ts` for why a gate that fails closed is worse. */
   readonly policyUrl: string
   /** The scoped service credential. Not shared: SD-05. */
@@ -202,6 +211,9 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
 
     ledgerUrl: required(source, 'LEDGER_URL'),
     indexerUrl: required(source, 'INDEXER_URL'),
+    // The same name and the same default as `micro-community` uses, so one deployment does not
+    // have to remember two spellings of one fact.
+    indexerNetwork: optional(source, 'INDEXER_NETWORK', 'mainnet'),
     policyUrl: required(source, 'POLICY_URL'),
     serviceToken: requiredSecret(source, 'MARKET_SERVICE_TOKEN'),
     upstreamDeadlineMs: integer(source, 'MARKET_UPSTREAM_DEADLINE_MS', 5_000, 100, 60_000),

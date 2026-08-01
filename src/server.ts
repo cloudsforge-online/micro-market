@@ -127,7 +127,11 @@ import {
   type CaseSubjectKind,
   type ModerationDeps,
 } from './moderation.ts'
-import { IndexerUnavailableError, type IndexerClient } from './indexerclient.ts'
+import {
+  IndexerUnavailableError,
+  type EscrowStatus,
+  type IndexerClient,
+} from './indexerclient.ts'
 import { computeIndicators } from './risk.ts'
 import type { PolicyClient } from './policyclient.ts'
 
@@ -156,6 +160,14 @@ export interface ServerDeps {
   readonly bids: BidDeps
   readonly moderation: ModerationDeps
   readonly indexer: IndexerClient
+  /**
+   * Which network an on-chain escrow is looked for on when the request does not say.
+   *
+   * A transaction hash is only meaningful with a network beside it — XRP's testnet and mainnet
+   * share addresses outright — so the indexer requires both, and a default that is wrong answers
+   * "no such transaction" for a transaction that exists.
+   */
+  readonly indexerNetwork: string
   readonly policy: PolicyClient
   readonly queue: Pick<JobQueue, 'enqueue'>
   /** Verifies inbound event signatures, and signs outbound ones. See the file header. */
@@ -753,13 +765,22 @@ function buildRoutes(): Route[] {
       let onchainTx: string | null = null
       if (draft.settlementMode === 'onchain') {
         onchainTx = requireString(body, 'onchainEscrowTx')
-        // FAIL CLOSED. "We could not confirm the escrow" must never become "list it anyway".
-        const status = await deps.indexer.escrowStatus(
-          typeof body['chain'] === 'string' ? body['chain'] : 'ember',
-          onchainTx,
-        )
+        // FAIL CLOSED, unchanged: "we could not confirm the escrow" must never become "list it
+        // anyway", and an `IndexerUnavailableError` from here is a 503 (see `errorStatus`) rather
+        // than a refusal of the listing.
+        //
+        // What changed is the REASON a refusal carries. This route used to answer "the on-chain
+        // escrow is not confirmed yet" for every activation, including the ones where the indexer
+        // had never heard of the transaction, because the route it called did not exist. A seller
+        // reading that waits for a confirmation that is never coming; an operator reading it
+        // investigates the chain instead of the integration. So the refusal now names which of
+        // the five things actually happened.
+        const chain = typeof body['chain'] === 'string' ? body['chain'] : 'ember'
+        const network =
+          typeof body['network'] === 'string' ? body['network'] : deps.indexerNetwork
+        const status = await deps.indexer.escrowStatus(chain, network, onchainTx)
         if (!status.confirmed) {
-          throw new ListingStateError('the on-chain escrow is not confirmed yet')
+          throw new ListingStateError(escrowRefusal(status, chain, network))
         }
       }
 
@@ -1272,6 +1293,36 @@ function disputeWire(dispute: {
 }
 
 /* ------------------------------------------------------------------ helpers */
+
+/**
+ * Why an on-chain escrow was refused, in words a seller can act on.
+ *
+ * The old message was a single sentence — "the on-chain escrow is not confirmed yet" — used for
+ * every outcome, and it was false for every one of them, because the route it was derived from
+ * did not exist. Five things can be true here and only one of them is "wait a bit longer"; the
+ * other four are things the seller or an operator must go and DO something about. A diagnosis
+ * that cannot distinguish them is worse than no diagnosis, because it directs the reader at the
+ * chain when the problem is the hash, the network, or a reverted transaction.
+ */
+export function escrowRefusal(status: EscrowStatus, chain: string, network: string): string {
+  if (!status.known) {
+    return `the indexer has no record of that transaction on ${chain}/${network} — check the hash and the network`
+  }
+  if (status.halted) {
+    return `the indexer has halted ${chain}/${network} after a deep reorganisation, so no escrow can be confirmed on it`
+  }
+  if (!status.canonical) {
+    return `that transaction is not on the canonical chain of ${chain}/${network} (${status.status ?? 'unknown'})`
+  }
+  if (status.status !== 'success') {
+    return `that transaction did not succeed on ${chain}/${network} (${status.status ?? 'unknown'})`
+  }
+  const seen = status.confirmations ?? 0
+  const needed = status.requiredConfirmations
+  return needed === null
+    ? `the on-chain escrow is not confirmed yet (${seen} confirmations)`
+    : `the on-chain escrow is not confirmed yet (${seen} of ${needed} confirmations)`
+}
 
 async function authenticate(ctx: RequestContext, deps: ServerDeps): Promise<Principal> {
   const token = bearerFrom(headerOf(ctx.req, 'authorization'))

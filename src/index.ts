@@ -171,6 +171,7 @@ const server = createServer({
   bids,
   moderation: { sql: db, ledger, producer: SERVICE },
   indexer,
+  indexerNetwork: env.indexerNetwork,
   policy,
   queue,
   // The same secret signs what this service emits and verifies what billing and identity send.

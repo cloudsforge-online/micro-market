@@ -80,6 +80,7 @@ const server = createServer({
   bids,
   moderation: { sql: db, ledger, producer: 'market' },
   indexer,
+  indexerNetwork: 'testnet',
   policy,
   queue: {
     async enqueue(options) {

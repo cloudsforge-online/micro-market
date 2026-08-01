@@ -18,7 +18,7 @@ pnpm verify      # boot the real service and sell something through it
 | | |
 |---|---|
 | **Owns** | `collections`, `listings`, `escrows`, `bids`, `offers`, `orders`, `order_royalties`, `moderation_cases`, `disputes`, `verifications` |
-| **Calls** | `ledger` (reservations, captures, refunds — **hard**), `indexer` (token facts — soft), `policy` (listing verdicts — soft) |
+| **Calls** | `ledger` (reservations, captures, refunds — **hard**), `indexer` (escrow confirmation — **hard** for on-chain listings; token facts — soft), `policy` (listing verdicts — soft) |
 | **Holds no** | money. There is no `balance` column, and there is not meant to be |
 | **Publishes** | `market.listing.listed`, `market.listing.sold`, `market.listing.removed`, `market.bid.placed`, `market.offer.made`, `market.order.paid_out`, `market.order.refunded`, `market.dispute.opened`, `market.dispute.resolved`, `market.moderation.opened`, `market.moderation.resolved` |
 | **Consumes** | `identity.user.deleted` |
@@ -119,7 +119,7 @@ reads. The hard/soft split is a decision, not a default:
 | Postgres | hard | Nothing works without it |
 | identity JWKS | soft | Tokens already issued keep verifying from cache; a JWKS blip must not stop the market |
 | **ledger** | **hard** | 07-dependency-map marks `market → ledger` hard for the reason a probe encodes: a market that cannot reserve, capture or refund can still *take a bid*, and that is the shape of the incident where a buyer's funds are gone and no order exists |
-| indexer | soft | Designed degradation — the risk indicators simply do not render |
+| indexer | soft for the probe, **hard on the on-chain path** | The risk indicators simply do not render, which is designed degradation. Activating an *on-chain* listing is not degradable: it asks the chain whether the escrow is real, and an unreachable indexer is a 503 rather than a refusal — "we could not ask" must never become "it is not confirmed" |
 | policy | soft | Designed degradation — policy fails **open and flagged**, never open and silent |
 
 Migrations are never run by the service process. `src/migrator.ts` is a separate one-shot job, and
@@ -181,7 +181,7 @@ src/
   outbox.ts         the transactional outbox and the signed relay
   jobs.ts           every background timer, as a lease
   ledgerclient.ts   postings, reservations, derived keys, and the failure taxonomy
-  indexerclient.ts  token facts. Unavailable is a state, not an error
+  indexerclient.ts  escrow confirmation and token facts. Never-seen and unconfirmed are two answers
   policyclient.ts   fails open AND flagged
   server.ts         routes, the error shape, the auth-fault mapping
   env.ts            every variable, validated at boot — including the fee/royalty ceiling check

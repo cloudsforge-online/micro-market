@@ -172,12 +172,25 @@ export function fakeIndexer(): FakeIndexer {
       }
       return facts.get(itemUrn) ?? null
     },
-    async escrowStatus(_chain, txHash) {
+    async escrowStatus(_chain, _network, txHash) {
       if (unavailable) {
         const { IndexerUnavailableError } = await import('./indexerclient.ts')
         throw new IndexerUnavailableError('the fake indexer is unavailable')
       }
-      return escrows.get(txHash) ?? { confirmed: false, confirmations: 0, heldQuantity: null }
+      // The default is "never seen", not "seen and unconfirmed". Those are the two answers the
+      // real indexer separates with a 404 and a 200, and a fake that collapsed them would let the
+      // defect this whole change removes reappear inside the tests.
+      return (
+        escrows.get(txHash) ?? {
+          known: false,
+          confirmed: false,
+          confirmations: null,
+          requiredConfirmations: null,
+          status: null,
+          canonical: false,
+          halted: false,
+        }
+      )
     },
   }
 }

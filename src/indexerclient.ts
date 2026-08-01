@@ -16,6 +16,14 @@
  *
  * 07-dependency-map says exactly this: "soft for indicators, hard for on-chain settlement".
  *
+ * **Only one of the two is a route today.** `escrowStatus` calls
+ * `GET /transactions/:chain/:network/:hash/confirmations`, which `micro-indexer` now serves.
+ * `tokenFacts` does not, and will not: the capability is keyed by a `micro-mint` item URN and
+ * five of its eight fields are contract state or custody state that a chain indexer does not and
+ * should not hold. The long comment on that method is the argument; it is a gap in the estate's
+ * design rather than a gap in the indexer's build, and it fails as an outage until something owns
+ * it.
+ *
  * **Nothing here signs anything, and nothing here reads a chain directly.** AD-07: incoming
  * on-chain reality is the indexer's, and market is a consumer of its read model. A service that
  * probed an RPC endpoint itself would be a second, disagreeing source of truth about the chain.
@@ -53,19 +61,77 @@ export interface TokenFacts {
   readonly deployerWalletExported: boolean
 }
 
+/**
+ * What the indexer says about the transaction a seller claims funded their escrow.
+ *
+ * **`known` is the field that ended the defect.** `micro-indexer` now answers 404
+ * `transaction_not_found` for a transaction it has never seen and 200 for one it has, so
+ * "I have no record of this" and "this has not reached its depth yet" are finally two different
+ * answers instead of the single `{confirmed: false}` that made every activation fail with the
+ * wrong reason.
+ *
+ * Every other field is `null` rather than a number when there is nothing honest to put in it —
+ * never seen, still pending, or reorged off the chain. A zero here would read as a real depth of
+ * zero, and this estate's rule is that a missing value is missing.
+ */
 export interface EscrowStatus {
+  /** False when the indexer has no record of the transaction at all. */
+  readonly known: boolean
+  /** The only field to act on. False whenever the answer is anything other than a clear yes. */
   readonly confirmed: boolean
-  readonly confirmations: number
-  /** What the chain says is now held, so a caller can check it against what was listed. */
-  readonly heldQuantity: string | null
+  /** Depth on the canonical chain. Null when there is no canonical chain to measure against. */
+  readonly confirmations: number | null
+  /** The depth this coin requires, from `contracts-chain` via the indexer. Never hardcoded here. */
+  readonly requiredConfirmations: number | null
+  /** The chain's word: `success`, `failed`, `pending`, `dropped` or `orphaned`. */
+  readonly status: string | null
+  /** True while the block holding it is still on the canonical chain. */
+  readonly canonical: boolean
+  /** True when the indexer has stopped vouching for this chain after a reorg past its alarm depth. */
+  readonly halted: boolean
 }
 
 export interface IndexerClient {
   /** Soft. Returns null when the indexer has never seen this item. */
   tokenFacts(itemUrn: string): Promise<TokenFacts | null>
   /** Hard. Throws `IndexerUnavailableError` rather than guessing. */
-  escrowStatus(chain: string, txHash: string): Promise<EscrowStatus>
+  escrowStatus(chain: string, network: string, txHash: string): Promise<EscrowStatus>
 }
+
+/** The 200 body of `GET /transactions/:chain/:network/:hash/confirmations`. */
+interface ConfirmationBody {
+  readonly confirmed?: unknown
+  readonly confirmations?: unknown
+  readonly requiredConfirmations?: unknown
+  readonly status?: unknown
+  readonly canonical?: unknown
+  readonly halted?: unknown
+}
+
+/**
+ * The `error.code` inside an indexer failure, or null if there is not one to read.
+ *
+ * **This is what separates an answer from an outage, and it is why the status alone will not do.**
+ * `transaction_not_found` is the indexer saying it has never seen the transaction, which is a
+ * fact. `not_found` is the indexer saying it does not serve the path we asked for, which is our
+ * own misconfiguration and tells us nothing about any chain. A body that cannot be read is treated
+ * as the second: an unreadable failure must never be promoted into a confident negative.
+ */
+function codeOf(err: HttpError): string | null {
+  try {
+    const parsed: unknown = JSON.parse(err.body)
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const error: unknown = (parsed as Record<string, unknown>)['error']
+    if (typeof error !== 'object' || error === null) return null
+    const code: unknown = (error as Record<string, unknown>)['code']
+    return typeof code === 'string' ? code : null
+  } catch {
+    return null
+  }
+}
+
+const number = (value: unknown): number | null => (typeof value === 'number' ? value : null)
+const text = (value: unknown): string | null => (typeof value === 'string' ? value : null)
 
 export interface IndexerClientOptions {
   readonly baseUrl: string
@@ -92,22 +158,28 @@ export function httpIndexerClient(options: IndexerClientOptions): IndexerClient 
         )
         return body.facts ?? null
       } catch (err) {
-        // A 404 is an ANSWER — the indexer has never seen this item — and is distinguishable from
-        // an outage. Collapsing the two would make an unknown token indistinguishable from a
-        // broken indexer, and the page would show "no indicators" for both.
-        // A 404 IS NOT AN ANSWER HERE, because this route does not exist.
+        // ══════════════════════════════════════════════════════════════════════════════════════
+        // STILL AN OUTAGE, AND STILL NOT A ROUTE. This is the one of the three capabilities in
+        // 18-build-status §3.3j that was NOT built, and the reason is not "not yet":
         //
-        // `micro-indexer` serves no `/v1` paths and no `/tokens` route at all — its table is
-        // /chains, /addresses, /transactions, /blocks, /watch, /backfills (`indexer/src/server.ts`).
-        // So every call 404s, and returning `null` rendered "no indicators" on every listing in
-        // the marketplace, permanently and silently. Found by micro-community, which needed the
-        // same missing capability.
+        //   * It is keyed by an ITEM URN — `cf:mint:token:0192` — which is a `micro-mint` name.
+        //     The indexer holds no registry mapping a mint item to a chain contract address, and
+        //     putting one there would make the chain's recorder the owner of a fact mint owns.
+        //   * Five of `TokenFacts`' eight fields are not derivable from anything the indexer
+        //     stores. `mintAuthorityPresent` and `ownershipRenounced` are contract STATE, an
+        //     `eth_call` this service deliberately never makes — its schema is blocks,
+        //     transactions, logs and address movements. `topHolderBps` needs total supply.
+        //     `holderCount` needs complete history. `deployerWalletExported` is a statement about
+        //     a private key and belongs to `custody`, not to any chain.
+        //   * Even `firstSeenAt` would be a plausible number and a wrong one: the follower
+        //     cold-starts at `tip − 2 × depth`, so "first seen" means first seen by that indexer,
+        //     and `risk.ts`'s `recently_deployed` indicator would fire on tokens years old.
         //
-        // Until the indexer serves it, an unreachable capability is an OUTAGE rather than an
-        // answer: the page says it could not check, instead of asserting there is nothing to find.
+        // So the indicators wait on a token registry, not on a route. Until then the honest
+        // report is "we could not check", never "there is nothing to find".
         throw new IndexerUnavailableError(
           err instanceof HttpError && err.status === 404
-            ? 'the indexer serves no token-facts route; see indexer/src/server.ts'
+            ? 'token facts are not a capability any service in the estate serves; see this comment'
             : err instanceof Error
               ? err.message
               : String(err),
@@ -115,32 +187,62 @@ export function httpIndexerClient(options: IndexerClientOptions): IndexerClient 
       }
     },
 
-    async escrowStatus(chain, txHash) {
+    async escrowStatus(chain, network, txHash) {
+      // The indexer's own convention: `:chain/:network` first, then the resource. Not a `/v1`
+      // prefix invented here — the gateway adds and strips that publicly, and it is served either
+      // way (`indexer/src/server.ts` PREFIXES).
+      //
+      // ONE template literal, not two concatenated. `indexerclient.test.ts` scans this file for the
+      // paths it requests, and a path split across a `+` reaches that scan as a fragment it cannot
+      // recognise — which is a route the checker would fail to see rather than a route that is
+      // fine. A guard that can be defeated by line-wrapping is not a guard.
+      const scope = `${encodeURIComponent(chain)}/${encodeURIComponent(network)}`
+      const path = `/transactions/${scope}/${encodeURIComponent(txHash)}/confirmations`
+      let body: ConfirmationBody
       try {
-        return await client.request<EscrowStatus>(
-          `/v1/chains/${encodeURIComponent(chain)}/transactions/${encodeURIComponent(txHash)}/escrow`,
-          { method: 'GET' },
-        )
+        body = await client.request<ConfirmationBody>(path, { method: 'GET' })
       } catch (err) {
-        // THE 404 BRANCH USED TO RETURN `{confirmed: false}`, AND THAT WAS A PERMANENT LIE.
+        // THE 404 BRANCH ONCE RETURNED `{confirmed: false}` AND THAT WAS A PERMANENT LIE — the
+        // route did not exist, so every call 404'd and `server.ts` reported "the on-chain escrow
+        // is not confirmed yet" for every activation on every chain.
         //
-        // The comment said "not an outage: the chain has no such transaction". But this route does
-        // not exist on the indexer — it serves `/transactions/:chain/:network/:hash`, with no
-        // `/v1` and no `/escrow` — so every call 404s regardless of the chain. `server.ts:761`
-        // turns `confirmed: false` into "the on-chain escrow is not confirmed yet", which means
-        // EVERY on-chain escrow activation fails with a diagnosis that is false: a seller retries
-        // for ever and an operator investigates the chain instead of the integration.
-        //
-        // Failing closed was right and is unchanged — an unconfirmed escrow must never be listed.
-        // What changes is that "we could not ask" is now reported as an outage rather than as a
-        // negative answer, which is the distinction the whole fail-closed argument rests on.
+        // It is served now, and a 404 splits in two. `transaction_not_found` is the indexer
+        // saying it has no record of this transaction: a real answer, and the seller needs to
+        // hear it, because it usually means they pasted the wrong hash or picked the wrong
+        // network. Any other 404 is a path this service asked for and the indexer does not serve,
+        // which is our own misconfiguration and says nothing about the chain — so it stays an
+        // outage, exactly as before.
+        if (err instanceof HttpError && err.status === 404 && codeOf(err) === 'transaction_not_found') {
+          return {
+            known: false,
+            confirmed: false,
+            confirmations: null,
+            requiredConfirmations: null,
+            status: null,
+            canonical: false,
+            halted: false,
+          }
+        }
+        throw new IndexerUnavailableError(err instanceof Error ? err.message : String(err))
+      }
+
+      // An unreadable 200 is not an answer. If the field this whole call exists for is not a
+      // boolean, the response shape has changed under us, and quietly reading that as "not
+      // confirmed" is how the original defect worked — a wrong reason a seller retries against for
+      // ever. It is an outage, and it says so.
+      if (typeof body.confirmed !== 'boolean') {
         throw new IndexerUnavailableError(
-          err instanceof HttpError && err.status === 404
-            ? 'the indexer serves no escrow-status route; see indexer/src/server.ts'
-            : err instanceof Error
-              ? err.message
-              : String(err),
+          `the indexer answered ${path} without a boolean 'confirmed'`,
         )
+      }
+      return {
+        known: true,
+        confirmed: body.confirmed,
+        confirmations: number(body.confirmations),
+        requiredConfirmations: number(body.requiredConfirmations),
+        status: text(body.status),
+        canonical: body.canonical === true,
+        halted: body.halted === true,
       }
     },
   }
