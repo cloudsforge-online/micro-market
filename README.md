@@ -7,7 +7,7 @@ Forge Market.
 pnpm install
 pnpm migrate     # a one-shot job. Never run from the service.
 pnpm start
-pnpm check       # typecheck + 275 tests
+pnpm check       # typecheck + 298 tests
 pnpm verify      # boot the real service and sell something through it
 ```
 
@@ -108,6 +108,43 @@ A reused key with a genuinely *different* body is still a 409. Both halves matte
 
 ---
 
+## The indexer routes this service asks for, checked as SHAPES
+
+`src/indexerclient.test.ts` asserts that every path `src/indexerclient.ts` requests is a whole route
+shape `micro-indexer` serves. It matters that it is a shape and not a prefix, and this repository is
+where that lesson was paid for twice.
+
+**The first version of this guard would have missed the defect it exists to catch.** It matched
+`path.startsWith(prefix)` against a list containing `/v1/chains/`, and it pinned the *count* of
+unserved paths rather than their shapes. `micro-mint` then shipped exactly this class of defect —
+its client called `/v1/chains/:chain/:network/transactions/:hash` and
+`/v1/chains/:chain/:network/tokens/:address`, neither of which the indexer has ever served — and
+run against those two paths the prefix guard judges **zero** of them unserved, because both begin
+with `/v1/chains/`, which really is a served prefix. A count is not a shape.
+
+It compares segment by segment now (`src/indexerclient.test.ts`, `matches`), against the route table
+copied from `indexer/src/server.ts:153-163` under both spellings of `PREFIXES`
+(`indexer/src/server.ts:134`). The dialect is `micro-mint`'s
+(`mint/scripts/checkindexerroutes.mjs`), copied rather than invented a third time. A second test
+mutates it — five paths the indexer does not serve, including mint's real one — and requires the
+matcher to reject every one, so a guard that has quietly become vacuous fails in the suite.
+
+**Two source changes came with it.** The escrow path is now one whole template literal with every
+segment written out (`src/indexerclient.ts:201-211`); it used to build a `${scope}` holding
+`chain/network`, and an interpolation is one opaque segment to any checker, so that path arrived at
+the guard as a four-segment shape which **matches `/transactions/:chain/:network/:hash`** — the
+wrong route, reported as fine. And the argument in `tokenFacts`' refusal was corrected: it claimed
+`mintAuthorityPresent` and `ownershipRenounced` were behind "an `eth_call` this service deliberately
+never makes", which stopped being true when `micro-indexer` gained
+`GET /tokens/:chain/:network/:address` (`indexer/src/server.ts:159`,
+`indexer/src/tokenstate.ts:207-215`). **The refusal is unchanged and stands on its remaining
+grounds** — the capability is keyed by a `micro-mint` item URN the indexer has no registry for, and
+three of `TokenFacts`' eight fields need complete holder history or a custody fact about a private
+key. The dead argument is marked in place rather than deleted, because a ledger of reasoning whose
+wrong entries vanish cannot be audited.
+
+---
+
 ## Health, and why there are three endpoints
 
 `/livez` is static — it answers from the process, touches nothing, and is what the restart policy
@@ -192,7 +229,8 @@ scripts/
 
 ## Tests
 
-`node:test` against a real Postgres. **275 tests, zero skipped.**
+`node:test` against a real Postgres. **291 `test(`/`it(` declarations, which run as 298 cases,
+zero skipped** (measured 2026-08-01 against `postgres:16-alpine`; a few declarations sit in loops).
 
 ```
 MARKET_TEST_DATABASE_URL=postgres://…/market_test pnpm test

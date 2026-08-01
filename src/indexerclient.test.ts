@@ -27,7 +27,7 @@
  * route. That test is the one that goes red the day somebody does own it.
  *
  * A correction to the note this file used to carry: `micro-indexer` DOES serve `/v1` paths. Its
- * `PREFIXES` (`indexer/src/server.ts:124`) mounts every domain route under both `/v1` and bare.
+ * `PREFIXES` (`indexer/src/server.ts:134`) mounts every domain route under both `/v1` and bare.
  * The old calls 404'd because there is no `/tokens` route and no `/escrow` sub-resource, not
  * because of the prefix.
  */
@@ -203,50 +203,156 @@ test('a 404 on token facts is an outage, never "no indicators"', async () => {
   )
 })
 
-test('exactly one route this client needs is one nothing in the estate serves', () => {
-  // The self-deleting note, resized. It used to pin TWO unserved routes; the escrow one is served
-  // now and this asserts it — `/transactions/` is in the served list below, so a regression to the
-  // old `/v1/chains/.../escrow` spelling fails here.
-  //
-  // The one that remains is token facts, and it is NOT waiting on the indexer. It is keyed by a
-  // `micro-mint` item URN that the indexer has no registry for, and five of `TokenFacts`' eight
-  // fields are contract state or custody state a chain indexer does not hold. Whoever owns that
-  // capability — a token registry — deletes this test and the workaround with it.
-  const served = [
-    '/chains/',
-    '/addresses/',
-    '/transactions/',
-    '/blocks/',
-    '/watch/',
-    '/backfills/',
-    '/v1/chains/',
-    '/v1/addresses/',
-    '/v1/transactions/',
-    '/v1/blocks/',
-    '/v1/watch/',
-    '/v1/backfills/',
-  ]
-  // COMMENTS STRIPPED FIRST. The first version of this scan matched `/v1`, `/tokens` and `/escrow`
-  // inside the comment explaining that those routes do not exist — a guard reading its own prose.
-  // A checker that cannot tell a request from a sentence about one is not a checker.
-  const code = CLIENT.split('\n')
-    .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+/* ------------------------------------------------- do these paths exist, as SHAPES not prefixes */
+
+/**
+ * `micro-indexer`'s route table, as patterns, both spellings.
+ *
+ * Copied from `indexer/src/server.ts:153-163` (`DOMAIN`) and `:134` (`PREFIXES = ['/v1', '']`).
+ * A copy, not an import: rule 2 of the estate's CI forbids source in one repository reaching into
+ * a sibling checkout, and `micro-mint`'s CI job — `scripts/checkindexerroutes.mjs` — is the version
+ * of this check that reads the real file. This one is the cheap in-suite backstop, and it goes red
+ * on a shape rather than on a prefix.
+ */
+const INDEXER_ROUTES: readonly string[] = [
+  '/chains/:chain/:network/status',
+  '/addresses/:chain/:network/:address/activity',
+  '/addresses/:chain/:network/:address/token-balances',
+  '/transactions/:chain/:network/:hash',
+  '/transactions/:chain/:network/:hash/confirmations',
+  '/tokens/:chain/:network/:address',
+  '/blocks/:chain/:network/:height',
+  '/watch/:chain/:network/:address',
+  '/backfills/:chain/:network',
+].flatMap((path) => [path, `/v1${path}`])
+
+/**
+ * Does a requested path match a served pattern? Same segment count, and every segment agrees.
+ *
+ * **Segment counts, never prefixes**, and this is the whole point of the rewrite. The version of
+ * this test that shipped first matched `path.startsWith(servedPrefix)` against a list containing
+ * `/v1/chains/`, and pinned the COUNT of unserved paths rather than their shapes. `micro-mint` then
+ * shipped the identical defect this file exists to catch — it called
+ * `/v1/chains/:chain/:network/transactions/:hash`, which the indexer has never served — and **the
+ * prefix version of this guard would have passed it**, because the dead path begins with a prefix
+ * the indexer really does serve. A count is not a shape. Copied from
+ * `mint/scripts/checkindexerroutes.mjs` rather than invented a third time.
+ */
+function matches(requested: string, pattern: string): boolean {
+  const asked = requested.split('/')
+  const serves = pattern.split('/')
+  if (asked.length !== serves.length) return false
+  return serves.every((segment, index) => {
+    const mine = asked[index] ?? ''
+    return segment.startsWith(':') ? mine.length > 0 : segment === mine
+  })
+}
+
+/**
+ * `${...}` is exactly ONE segment.
+ *
+ * So a helper standing for two — a `${scope}` holding `chain/network` — produces a path one segment
+ * short of every pattern and is refused rather than guessed at. That is deliberate: a checker that
+ * accepts a path whose shape it cannot see would have passed the defect it exists to catch. This
+ * client had exactly such a helper until the shape check was added, and removing it is part of the
+ * same change.
+ */
+const placeholder = (path: string): string => path.replace(/\$\{[^}]*\}/g, 'x')
+
+/** Every request path this client sends, read out of its source with the prose stripped. */
+export function requestedPaths(source: string): readonly string[] {
+  // COMMENTS STRIPPED FIRST. This file and the client both quote dead paths in prose, and a
+  // checker that cannot tell a request from a sentence about one is not a checker.
+  const code = source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((line) => !/^\s*(\/\/|\*)/.test(line))
     .join('\n')
-  const paths = [...code.matchAll(/`(\/[A-Za-z0-9/${}().\-_:]+)`/g)]
-    .map((m) => m[1] ?? '')
-    .filter((p) => p.length > 1)
-  assert.ok(paths.length >= 2, `the scan found no request paths at all: ${paths.join(', ')}`)
-  const unserved = paths.filter((p) => !served.some((s) => p.startsWith(s)))
-  assert.equal(
-    unserved.length,
-    1,
-    `expected only the token-facts route to be unserved, found ${unserved.length}: ${unserved.join(', ')}`,
+  return [...code.matchAll(/`(\/[^`]*)`/g)].map((m) => m[1] ?? '').filter((p) => p.length > 1)
+}
+
+test('every path this client requests is a whole route shape the indexer serves — or the one that is not', () => {
+  const paths = requestedPaths(CLIENT)
+  assert.equal(paths.length, 2, `expected exactly two request paths, found: ${paths.join(', ')}`)
+
+  const unserved = paths.filter((p) => !INDEXER_ROUTES.some((r) => matches(placeholder(p), r)))
+
+  // The escrow path is SERVED, stated positively so that the assertion below cannot go vacuous by
+  // both paths quietly becoming unserved.
+  const served = paths.filter((p) => !unserved.includes(p))
+  assert.deepEqual(
+    served.map(placeholder),
+    ['/transactions/x/x/x/confirmations'],
+    `the escrow question must reach a route the indexer serves; asked: ${paths.join(', ')}`,
   )
-  assert.ok(unserved.every((p) => p.includes('/facts')), unserved.join(', '))
-  // And the escrow path is a served one now. Stated positively so that deleting the line above
-  // could not quietly make this test vacuous.
+
+  // And exactly one is not, by SHAPE: token facts. It is not waiting on the indexer — it is keyed
+  // by a `micro-mint` item URN the indexer has no registry for, and three of `TokenFacts`' eight
+  // fields need complete holder history or a custody fact about a private key. Whoever owns that
+  // capability — a token registry — deletes this test and the workaround with it.
+  assert.deepEqual(
+    unserved.map(placeholder),
+    ['/v1/tokens/x/facts'],
+    `unserved paths are not the one expected: ${unserved.join(', ')}`,
+  )
+})
+
+test('the shape check goes red on a path the indexer does not serve — including a served PREFIX', () => {
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // THE MUTATION, IN THE SUITE.
+  //
+  // It is not enough that the check says "all good". It has to be shown that it can say otherwise,
+  // and specifically on the case the old prefix version passed: `/v1/chains/…/transactions/…` is
+  // the exact dead path `micro-mint` shipped, and it BEGINS with `/v1/chains/`, which the indexer
+  // really does serve. A prefix test calls it fine. A shape test does not.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  const dead = [
+    // micro-mint's real defect: the status route's prefix with a resource bolted on.
+    '/v1/chains/${chain}/${network}/transactions/${hash}',
+    // micro-market's original two.
+    '/v1/chains/${chain}/transactions/${hash}/escrow',
+    '/v1/tokens/${urn}/facts',
+    // Right shape, wrong resource.
+    '/v1/receipts/${chain}/${network}/${hash}',
+    // Right resource, one segment too many.
+    '/v1/transactions/${chain}/${network}/${hash}/confirmations/latest',
+  ]
+  for (const path of dead) {
+    assert.equal(
+      INDEXER_ROUTES.some((r) => matches(placeholder(path), r)),
+      false,
+      `${path} is not served by micro-indexer, but this check accepted it`,
+    )
+  }
+
+  // ── And the reason the `${scope}` helper had to come out of the client ──────────────────────
+  //
+  // `/transactions/${scope}/${hash}/confirmations`, with `${scope}` holding `chain/network`,
+  // collapses to FOUR segments. That is not merely one short of the confirmations route — it is
+  // exactly the shape of `/transactions/:chain/:network/:hash`, so the checker matches it against
+  // the WRONG route and reports it as fine. Measured here rather than asserted in prose, because
+  // it is the strongest argument for writing every segment out: a shape check can only judge the
+  // shape it is shown, and a helper hides one.
+  assert.equal(
+    INDEXER_ROUTES.some((r) => matches(placeholder('/transactions/${scope}/${hash}/confirmations'), r)),
+    true,
+    'the scope form was expected to match a DIFFERENT route — if it no longer does, rewrite this note',
+  )
+  assert.equal(placeholder('/transactions/${scope}/${hash}/confirmations').split('/').length, 5)
+  assert.equal(
+    placeholder('/transactions/${chain}/${network}/${hash}/confirmations').split('/').length,
+    6,
+  )
+
+  // And it is not simply refusing everything: every route the indexer serves matches itself, and
+  // the two spellings are both real.
+  for (const route of INDEXER_ROUTES) {
+    assert.ok(matches(route, route), route)
+  }
   assert.ok(
-    paths.some((p) => p.startsWith('/transactions/')),
-    `the escrow question is not asked of a served route: ${paths.join(', ')}`,
+    matches('/v1/transactions/ember/testnet/0xabc/confirmations', '/v1/transactions/:chain/:network/:hash/confirmations'),
+  )
+  assert.ok(
+    matches('/transactions/ember/testnet/0xabc/confirmations', '/transactions/:chain/:network/:hash/confirmations'),
   )
 })

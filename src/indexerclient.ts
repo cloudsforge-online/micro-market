@@ -18,11 +18,12 @@
  *
  * **Only one of the two is a route today.** `escrowStatus` calls
  * `GET /transactions/:chain/:network/:hash/confirmations`, which `micro-indexer` now serves.
- * `tokenFacts` does not, and will not: the capability is keyed by a `micro-mint` item URN and
- * five of its eight fields are contract state or custody state that a chain indexer does not and
- * should not hold. The long comment on that method is the argument; it is a gap in the estate's
- * design rather than a gap in the indexer's build, and it fails as an outage until something owns
- * it.
+ * `tokenFacts` does not, and will not: the capability is keyed by a `micro-mint` item URN the
+ * indexer has no registry for, and three of its eight fields need complete holder history or a
+ * custody fact about a private key. The long comment on that method is the argument — including
+ * the part of it that has since become false, kept and marked rather than quietly deleted. It is a
+ * gap in the estate's design rather than a gap in the indexer's build, and it fails as an outage
+ * until something owns it.
  *
  * **Nothing here signs anything, and nothing here reads a chain directly.** AD-07: incoming
  * on-chain reality is the indexer's, and market is a consumer of its read model. A service that
@@ -165,15 +166,24 @@ export function httpIndexerClient(options: IndexerClientOptions): IndexerClient 
         //   * It is keyed by an ITEM URN — `cf:mint:token:0192` — which is a `micro-mint` name.
         //     The indexer holds no registry mapping a mint item to a chain contract address, and
         //     putting one there would make the chain's recorder the owner of a fact mint owns.
-        //   * Five of `TokenFacts`' eight fields are not derivable from anything the indexer
-        //     stores. `mintAuthorityPresent` and `ownershipRenounced` are contract STATE, an
-        //     `eth_call` this service deliberately never makes — its schema is blocks,
-        //     transactions, logs and address movements. `topHolderBps` needs total supply.
-        //     `holderCount` needs complete history. `deployerWalletExported` is a statement about
-        //     a private key and belongs to `custody`, not to any chain.
+        //   * Three of `TokenFacts`' eight fields are not derivable from anything any service in
+        //     the estate holds. `topHolderBps` and `holderCount` need COMPLETE holder history —
+        //     every transfer from genesis — and the follower cold-starts at `tip − 2 × depth`, so
+        //     it has never had it and a number computed from what it has would be confidently
+        //     wrong. `deployerWalletExported` is a statement about a private key and belongs to
+        //     `custody`, not to any chain.
         //   * Even `firstSeenAt` would be a plausible number and a wrong one: the follower
         //     cold-starts at `tip − 2 × depth`, so "first seen" means first seen by that indexer,
         //     and `risk.ts`'s `recently_deployed` indicator would fire on tokens years old.
+        //
+        // **A correction. The transport argument this comment used to make is dead, and the
+        // refusal never rested on it.** It said `mintAuthorityPresent` and `ownershipRenounced`
+        // are contract state behind "an `eth_call` this service deliberately never makes". The
+        // indexer makes one now: `GET /tokens/:chain/:network/:address` reads exactly those two
+        // fields by `eth_call`, at the indexer's own canonical head and only after proving the
+        // provider still serves that head (`indexer/src/server.ts:159`,
+        // `indexer/src/tokenstate.ts:207-215`). So two of the eight fields became available — keyed
+        // by CONTRACT ADDRESS, which is the first bullet, not by the item URN this method is given.
         //
         // So the indicators wait on a token registry, not on a route. Until then the honest
         // report is "we could not check", never "there is nothing to find".
@@ -188,16 +198,17 @@ export function httpIndexerClient(options: IndexerClientOptions): IndexerClient 
     },
 
     async escrowStatus(chain, network, txHash) {
-      // The indexer's own convention: `:chain/:network` first, then the resource. Not a `/v1`
-      // prefix invented here — the gateway adds and strips that publicly, and it is served either
-      // way (`indexer/src/server.ts` PREFIXES).
+      // The indexer's own convention: the RESOURCE first, then `:chain/:network`, then the key.
+      // Not a `/v1` prefix invented here — the gateway adds and strips that publicly, and it is
+      // served either way (`indexer/src/server.ts:134`, `PREFIXES = ['/v1', '']`).
       //
-      // ONE template literal, not two concatenated. `indexerclient.test.ts` scans this file for the
-      // paths it requests, and a path split across a `+` reaches that scan as a fragment it cannot
-      // recognise — which is a route the checker would fail to see rather than a route that is
-      // fine. A guard that can be defeated by line-wrapping is not a guard.
-      const scope = `${encodeURIComponent(chain)}/${encodeURIComponent(network)}`
-      const path = `/transactions/${scope}/${encodeURIComponent(txHash)}/confirmations`
+      // ONE template literal, WHOLE, with every segment written out. `indexerclient.test.ts` scans
+      // this file for the paths it requests and compares them against the indexer's route patterns
+      // segment by segment, so a path split across a `+` reaches that scan as a fragment, and a
+      // `${scope}` helper standing for two segments reaches it as one segment — either way the
+      // checker is judging a shape it cannot see. That is worse than a wrong path, because nothing
+      // goes red. The `scope` variable that used to be here was exactly that hazard.
+      const path = `/transactions/${encodeURIComponent(chain)}/${encodeURIComponent(network)}/${encodeURIComponent(txHash)}/confirmations`
       let body: ConfirmationBody
       try {
         body = await client.request<ConfirmationBody>(path, { method: 'GET' })
