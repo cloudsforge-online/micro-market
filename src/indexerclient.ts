@@ -95,8 +95,23 @@ export function httpIndexerClient(options: IndexerClientOptions): IndexerClient 
         // A 404 is an ANSWER — the indexer has never seen this item — and is distinguishable from
         // an outage. Collapsing the two would make an unknown token indistinguishable from a
         // broken indexer, and the page would show "no indicators" for both.
-        if (err instanceof HttpError && err.status === 404) return null
-        throw new IndexerUnavailableError(err instanceof Error ? err.message : String(err))
+        // A 404 IS NOT AN ANSWER HERE, because this route does not exist.
+        //
+        // `micro-indexer` serves no `/v1` paths and no `/tokens` route at all — its table is
+        // /chains, /addresses, /transactions, /blocks, /watch, /backfills (`indexer/src/server.ts`).
+        // So every call 404s, and returning `null` rendered "no indicators" on every listing in
+        // the marketplace, permanently and silently. Found by micro-community, which needed the
+        // same missing capability.
+        //
+        // Until the indexer serves it, an unreachable capability is an OUTAGE rather than an
+        // answer: the page says it could not check, instead of asserting there is nothing to find.
+        throw new IndexerUnavailableError(
+          err instanceof HttpError && err.status === 404
+            ? 'the indexer serves no token-facts route; see indexer/src/server.ts'
+            : err instanceof Error
+              ? err.message
+              : String(err),
+        )
       }
     },
 
@@ -107,12 +122,25 @@ export function httpIndexerClient(options: IndexerClientOptions): IndexerClient 
           { method: 'GET' },
         )
       } catch (err) {
-        if (err instanceof HttpError && err.status === 404) {
-          // Not an outage: the chain has no such transaction. An unconfirmed escrow, reported as
-          // one, so the listing is refused rather than opened against nothing.
-          return { confirmed: false, confirmations: 0, heldQuantity: null }
-        }
-        throw new IndexerUnavailableError(err instanceof Error ? err.message : String(err))
+        // THE 404 BRANCH USED TO RETURN `{confirmed: false}`, AND THAT WAS A PERMANENT LIE.
+        //
+        // The comment said "not an outage: the chain has no such transaction". But this route does
+        // not exist on the indexer — it serves `/transactions/:chain/:network/:hash`, with no
+        // `/v1` and no `/escrow` — so every call 404s regardless of the chain. `server.ts:761`
+        // turns `confirmed: false` into "the on-chain escrow is not confirmed yet", which means
+        // EVERY on-chain escrow activation fails with a diagnosis that is false: a seller retries
+        // for ever and an operator investigates the chain instead of the integration.
+        //
+        // Failing closed was right and is unchanged — an unconfirmed escrow must never be listed.
+        // What changes is that "we could not ask" is now reported as an outage rather than as a
+        // negative answer, which is the distinction the whole fail-closed argument rests on.
+        throw new IndexerUnavailableError(
+          err instanceof HttpError && err.status === 404
+            ? 'the indexer serves no escrow-status route; see indexer/src/server.ts'
+            : err instanceof Error
+              ? err.message
+              : String(err),
+        )
       }
     },
   }
