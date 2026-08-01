@@ -224,7 +224,7 @@ describe('jobs and the outbox, against a real Postgres', { skip }, () => {
     assert.equal(envelope['topic'], 'market.listing.sold')
     // The MAC is over the exact bytes the client will send: the same object, stringified with the
     // same key order, so a subscriber recomputing it over the received body matches.
-    const signature = received[0]?.headers['x-cloudsforge-signature'] as string
+    const signature = received[0]?.headers['cf-signature'] as string
     assert.ok(
       verifyEventSignature(
         JSON.stringify(envelope),

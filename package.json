@@ -32,6 +32,7 @@
   "dependencies": {
     "@cloudsforge/auth": "link:../runtime/packages/auth",
     "@cloudsforge/contracts-money": "link:../contracts/packages/money",
+    "@cloudsforge/contracts-events": "link:../contracts/packages/events",
     "@cloudsforge/db": "link:../runtime/packages/db",
     "@cloudsforge/http": "link:../runtime/packages/http",
     "@cloudsforge/jobs": "link:../runtime/packages/jobs",
