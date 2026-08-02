@@ -634,6 +634,198 @@ export const MIGRATIONS: readonly Migration[] = [
       create index if not exists disputes_open_all_idx on disputes (opened_at) where state = 'open';
     `,
   },
+  {
+    version: 11,
+    name: 'engagement',
+    up: `
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+      -- SUBSIDIES AND BOUNTIES — docs/ecosystem/21 §5, "never ghost demand".
+      --
+      -- The marketplace's cold start is circular: zero listings begets zero buyers begets zero
+      -- listings, and a first seller pays full fees to list into a void. So the platform funds
+      -- the SUPPLY side — it waives listing fees for a window, and it pays a bounty for the
+      -- first listings — and it is forbidden, structurally, from funding the DEMAND side.
+      --
+      -- **THE REFUSAL IS THE POINT OF THIS MIGRATION.** 21 §2 rejects "fake it" outright:
+      -- synthetic bids, ghost bettors, invisible house positions. It is the one form of this
+      -- that costs nothing, and it is fraud. A comment saying "market never places bids" is
+      -- worth nothing the day somebody writes the route; the three ALTERs at the bottom make a
+      -- platform-funded bid, offer or escrow UNREPRESENTABLE instead.
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+
+      -- A zero-fee listing window. Bounded in TIME and in MONEY: a window with no budget is an
+      -- unbounded spend, and "we forgot it was on" is the ordinary way that happens.
+      create table if not exists engagement_windows (
+        id              uuid          primary key default gen_random_uuid(),
+        name            text          not null,
+        starts_at       timestamptz   not null,
+        ends_at         timestamptz   not null,
+        -- The most this window may forgo in fees, and what it has forgone so far. The pair is
+        -- worlds' seasons.reward_budget_shards shape (worlds/src/migrations.ts:331-341), for the
+        -- same reason: a budget nothing decrements is a budget nobody is keeping.
+        budget_shards   numeric(78,0) not null,
+        spent_shards    numeric(78,0) not null default 0,
+        -- The bounty a seller is paid for a qualifying listing, and how many listings qualify.
+        -- Zero bounty means this window only waives fees.
+        bounty_shards   numeric(78,0) not null default 0,
+        bounty_max_listings integer   not null default 0,
+        created_by      text          not null,
+        created_at      timestamptz   not null default now(),
+
+        constraint engagement_windows_ordered check (ends_at > starts_at),
+        constraint engagement_windows_budget_positive check (budget_shards > 0),
+        -- The same shape as seasons_within_budget: spend is bounded by the budget IN THE ROW,
+        -- so an over-spend is not a race a handler can lose — it is a write that does not commit.
+        constraint engagement_windows_within_budget check (
+          spent_shards >= 0 and spent_shards <= budget_shards
+        ),
+        constraint engagement_windows_bounty_pair check (
+          (bounty_shards = 0) = (bounty_max_listings = 0)
+        ),
+        constraint engagement_windows_bounty_nonnegative check (
+          bounty_shards >= 0 and bounty_max_listings >= 0
+        ),
+        constraint engagement_windows_named check (char_length(name) between 1 and 200)
+      );
+
+      -- At most one window may be live at any instant. Two overlapping windows would make "which
+      -- budget did this listing's waiver come out of" a question with two answers, and an
+      -- exclusion constraint answers it in the schema rather than in whichever handler reads
+      -- first. btree_gist is what lets a range and equality share one index.
+      create extension if not exists btree_gist;
+      alter table engagement_windows
+        drop constraint if exists engagement_windows_no_overlap;
+      alter table engagement_windows
+        add constraint engagement_windows_no_overlap
+        exclude using gist (tstzrange(starts_at, ends_at) with &&);
+
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+      -- 21 §7.4: "Every engagement grant resolves to a ledger entry pair; a grant with no
+      -- posting cannot exist."
+      --
+      -- 'ledger_entry_id' is NOT NULL, which is the strongest form of that sentence available:
+      -- the row cannot be written at all until the posting exists. This is 'escrows.hold_entry_id'
+      -- (migration 5, :354) applied to the engagement programme, and its comment there is exactly
+      -- the argument — "a row that cannot name the posting that moved the value is an assertion
+      -- that money is held somewhere, with nothing to check it against."
+      --
+      -- The residual window is deliberate and points the safe way: a crash between the ledger
+      -- post and this insert leaves an ENTRY WITH NO ROW, which over-states the programme's
+      -- spend in the ledger and is visible there. The retry replays on the same idempotency key
+      -- (derived from the natural key below, never from this row's id) and adopts the entry. The
+      -- opposite arrangement — a row written first — would be a claim that a seller was paid
+      -- when nobody was.
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists engagement_grants (
+        id               uuid          primary key default gen_random_uuid(),
+        window_id        uuid          references engagement_windows (id),
+        grant_kind       text          not null,
+        -- Who received the value. For a bounty, the seller; for a fee subsidy, the platform's own
+        -- fee account — the seller's benefit there is the fee they did NOT pay.
+        beneficiary      text          not null,
+        listing_id       uuid          references listings (id) on delete set null,
+        amount_shards    numeric(78,0) not null,
+        -- NOT NULL. See the block above. Text rather than a uuid FK: it is a row micro-ledger
+        -- owns, exactly like escrows.hold_entry_id.
+        ledger_entry_id  text          not null,
+        correlation_id   text,
+        granted_at       timestamptz   not null default now(),
+
+        -- The closed list, and it is closed for the reason in this migration's header: every kind
+        -- here pays a SELLER or the platform's own fee line. There is no kind that funds a bid,
+        -- an offer or a buyer, and adding one would have to survive review of this comment.
+        constraint engagement_grants_kind_known check (
+          grant_kind in ('listing_fee_subsidy','first_listing_bounty')
+        ),
+        constraint engagement_grants_amount_positive check (amount_shards > 0),
+        -- A bounty names the listing it was earned by; a subsidy names the listing whose fee it
+        -- paid. Either way a grant with no listing is a payment nobody can trace to a cause.
+        constraint engagement_grants_names_a_listing check (listing_id is not null),
+        -- **THE BENEFICIARY IS NEVER AN ENGAGEMENT ACCOUNT.** A grant that credited an
+        -- engagement account would be the programme paying itself, which inflates the spend
+        -- figure §7.4 exists to make countable.
+        constraint engagement_grants_beneficiary_is_not_the_programme check (
+          beneficiary not like 'engagement:%'
+          and beneficiary <> 'platform:engagement-treasury'
+        )
+      );
+
+      -- One bounty per (window, listing), and one subsidy per (window, listing). The natural key
+      -- the ledger idempotency key is ALSO derived from, so a replayed post and a refused insert
+      -- describe the same fact rather than disagreeing about it.
+      create unique index if not exists engagement_grants_natural_uniq
+        on engagement_grants (grant_kind, listing_id) where listing_id is not null;
+
+      create index if not exists engagement_grants_window_idx
+        on engagement_grants (window_id, granted_at desc);
+
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+      -- WHAT MAKES A WAIVER A SUBSIDY RATHER THAN A DISCOUNT.
+      --
+      -- A zero-fee window works through the fee rate this service ALREADY snapshots per listing
+      -- ('listings.platform_fee_bps', migration 5) — so the seller pays nothing and settlement's
+      -- one-balanced-entry arithmetic is untouched. But a waiver alone means the engagement
+      -- account funds NOTHING: the platform simply earns less, the "budget" is fictional, and 21
+      -- §4's promise that an auditor can reconstruct the programme from the ledger is false for
+      -- every subsidy.
+      --
+      -- So the listing remembers WHICH window waived its fee and WHAT RATE was waived, and at
+      -- settlement the forgone amount is posted out of 'engagement:market' into the platform's
+      -- own fee line. The seller pays nothing, the revenue line is whole, and the cost lands
+      -- where the programme can be held to it. Without 'waived_fee_bps' the original rate is
+      -- gone — 'platform_fee_bps' is already 0 by then — and the subsidy could not be sized.
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+      alter table listings add column if not exists engagement_window_id uuid
+        references engagement_windows (id);
+      alter table listings add column if not exists engagement_waived_fee_bps integer;
+
+      alter table listings drop constraint if exists listings_waiver_is_complete;
+      alter table listings add constraint listings_waiver_is_complete check (
+        (engagement_window_id is null) = (engagement_waived_fee_bps is null)
+      );
+      -- A waiver that waived nothing is not a waiver, and a rate outside the fee's own range
+      -- would size a subsidy nobody could have been charged.
+      alter table listings drop constraint if exists listings_waived_rate_in_range;
+      alter table listings add constraint listings_waived_rate_in_range check (
+        engagement_waived_fee_bps is null
+        or (engagement_waived_fee_bps > 0 and engagement_waived_fee_bps <= 10000)
+      );
+      -- A waived listing charges the seller nothing. Stated here so the two columns cannot drift
+      -- into describing a listing that was "subsidised" while still charging full freight.
+      alter table listings drop constraint if exists listings_waived_charges_nothing;
+      alter table listings add constraint listings_waived_charges_nothing check (
+        engagement_window_id is null or platform_fee_bps = 0
+      );
+
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+      -- NEVER GHOST DEMAND — 21 §5, as three constraints rather than three sentences.
+      --
+      -- Every route by which value could enter this marketplace as DEMAND names a subject: an
+      -- escrow holds it, a bid places it, an offer makes it. If none of those subjects can be an
+      -- engagement account, then the platform cannot bid against its own sellers however the
+      -- code is later written — including by somebody who has never read 21 §2.
+      --
+      -- Safe as an ALTER on live tables: no engagement subject has ever existed in this estate
+      -- (the grammar itself only learned the spelling in micro-contracts 743e9ca), so no
+      -- existing row can violate these and the validation scan cannot fail.
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+      alter table escrows drop constraint if exists escrows_never_platform_funded;
+      alter table escrows add constraint escrows_never_platform_funded check (
+        subject not like 'engagement:%' and subject <> 'platform:engagement-treasury'
+      );
+
+      alter table bids drop constraint if exists bids_never_platform_funded;
+      alter table bids add constraint bids_never_platform_funded check (
+        bidder_subject not like 'engagement:%' and bidder_subject <> 'platform:engagement-treasury'
+      );
+
+      alter table offers drop constraint if exists offers_never_platform_funded;
+      alter table offers add constraint offers_never_platform_funded check (
+        offerer_subject not like 'engagement:%'
+        and offerer_subject <> 'platform:engagement-treasury'
+      );
+    `,
+  },
 ]
 
 /**
@@ -657,6 +849,8 @@ export const BASELINE_VERSION = 0
 
 /** Every table this service owns, for the test harness's truncate. Order is child-first. */
 export const TABLES: readonly string[] = Object.freeze([
+  'engagement_grants',
+  'engagement_windows',
   'disputes',
   'moderation_cases',
   'order_royalties',

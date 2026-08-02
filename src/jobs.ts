@@ -66,7 +66,8 @@ import { JobRunner, type Job, type JobQueue, type RunnerEvent } from '@cloudsfor
 import type { Logger, Metrics } from '@cloudsforge/telemetry'
 import { createRelay, type Db, type RelayDeps } from './outbox.ts'
 import { closeAuction, duePayouts, releaseProceeds, type OrderDeps } from './orders.ts'
-import { ListingStateError, endListing, expiredListings } from './listings.ts'
+import { paySettlementSubsidy } from './engagement.ts'
+import { ListingStateError, endListing, expiredListings, findListing } from './listings.ts'
 import { closeOffer, dueAuctions, expiredOffers, type BidDeps } from './bids.ts'
 import { reapIdempotencyKeys } from './idempotency.ts'
 
@@ -280,6 +281,29 @@ export function registerHandlers(runner: JobRunner, deps: JobDeps): JobRunner {
       })
       if (ctx.signal.aborted) return
       deps.metrics.increment('market_auction_closes_total', { outcome: result.outcome })
+      // 21 §5: an auction settled inside a zero-fee window has its waived fee funded out of
+      // engagement:market, exactly as a direct purchase does. Best-effort — a subsidy that
+      // cannot be paid must not dead-letter the auction close, which has already settled money.
+      if (result.outcome === 'settled' && result.order) {
+        const listing = await findListing(deps.sql, listingId)
+        if (listing?.engagementWindowId) {
+          await paySettlementSubsidy(
+            { sql: deps.sql, ledger: deps.orders.ledger },
+            {
+              listingId,
+              windowId: listing.engagementWindowId,
+              waivedFeeBps: listing.engagementWaivedFeeBps,
+              price: result.order.amount,
+              correlationId: `close:${listingId}`,
+            },
+          ).catch((err: unknown) => {
+            deps.logger.warn('a listing-fee subsidy could not be funded after an auction close', {
+              listingId,
+              err,
+            })
+          })
+        }
+      }
       deps.logger.info('auction close', { listingId, outcome: result.outcome, orderId: result.order?.id })
     },
   )

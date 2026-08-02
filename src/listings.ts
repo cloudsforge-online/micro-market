@@ -298,6 +298,9 @@ export interface Listing {
   readonly settlementMode: SettlementMode
   readonly royaltyBps: number
   readonly platformFeeBps: number
+  /** 21 §5: the window that waived this listing's fee, and the rate it waived. */
+  readonly engagementWindowId: string | null
+  readonly engagementWaivedFeeBps: number | null
   readonly auctionEndsAt: Date | null
   readonly expiresAt: Date | null
   readonly status: ListingStatus
@@ -326,6 +329,8 @@ interface ListingRow {
   readonly settlement_mode: SettlementMode
   readonly royalty_bps: number
   readonly platform_fee_bps: number
+  readonly engagement_window_id: string | null
+  readonly engagement_waived_fee_bps: number | null
   readonly auction_ends_at: Date | null
   readonly expires_at: Date | null
   readonly status: ListingStatus
@@ -341,6 +346,7 @@ interface ListingRow {
 const LISTING_COLUMNS = `id, seller_subject, seller_wallet_id, collection_id, asset_kind, item_urn,
   quantity::text as quantity, item_asset_code, pricing_mode, price::text as price,
   reserve_price::text as reserve_price, asset_code, settlement_mode, royalty_bps, platform_fee_bps,
+  engagement_window_id, engagement_waived_fee_bps,
   auction_ends_at, expires_at, status, frozen, escrow_id, onchain_escrow_tx,
   dispute_window_ms::text as dispute_window_ms, created_at, activated_at, ended_at`
 
@@ -361,6 +367,8 @@ export function toListing(row: ListingRow): Listing {
     settlementMode: row.settlement_mode,
     royaltyBps: row.royalty_bps,
     platformFeeBps: row.platform_fee_bps,
+    engagementWindowId: row.engagement_window_id,
+    engagementWaivedFeeBps: row.engagement_waived_fee_bps,
     auctionEndsAt: row.auction_ends_at,
     expiresAt: row.expires_at,
     status: row.status,
@@ -392,6 +400,14 @@ export interface CreateListingInput {
   readonly royaltyBps: number
   /** From the environment, snapshotted. See the file header. */
   readonly platformFeeBps: number
+  /**
+   * The zero-fee window this listing was created inside, and the rate it waived — docs/ecosystem
+   * 21 §5. Both or neither (`listings_waiver_is_complete`); when present `platformFeeBps` is 0
+   * (`listings_waived_charges_nothing`). The waived RATE is kept because the subsidy is sized
+   * from it at settlement, by which time `platform_fee_bps` is 0 and the original is gone.
+   */
+  readonly engagementWindowId?: string | null
+  readonly engagementWaivedFeeBps?: number | null
   readonly disputeWindowMs: number
   readonly auctionEndsAt?: Date | null
   readonly expiresAt?: Date | null
@@ -441,7 +457,8 @@ export async function createListing(
       insert into listings (
         seller_subject, seller_wallet_id, collection_id, asset_kind, item_urn, quantity,
         item_asset_code, pricing_mode, price, reserve_price, asset_code, settlement_mode,
-        royalty_bps, platform_fee_bps, auction_ends_at, expires_at, dispute_window_ms
+        royalty_bps, platform_fee_bps, engagement_window_id, engagement_waived_fee_bps,
+        auction_ends_at, expires_at, dispute_window_ms
       ) values (
         ${input.sellerSubject}, ${input.sellerWalletId ?? null}, ${input.collectionId ?? null},
         ${input.assetKind}, ${input.itemUrn}, ${input.quantity.toString()},
@@ -449,6 +466,7 @@ export async function createListing(
         ${input.price === null || input.price === undefined ? null : input.price.toString()},
         ${input.reservePrice === null || input.reservePrice === undefined ? null : input.reservePrice.toString()},
         ${input.assetCode}, ${input.settlementMode}, ${input.royaltyBps}, ${input.platformFeeBps},
+        ${input.engagementWindowId ?? null}, ${input.engagementWaivedFeeBps ?? null},
         ${input.auctionEndsAt ?? null}, ${input.expiresAt ?? null}, ${String(input.disputeWindowMs)}
       )
       returning ${tx.unsafe(LISTING_COLUMNS)}

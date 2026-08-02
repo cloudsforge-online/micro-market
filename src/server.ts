@@ -72,6 +72,17 @@ import { MoneyError, parseAmount, type RoyaltyRecipient } from './money.ts'
 import { LedgerRefusedError } from './ledgerclient.ts'
 import { EscrowError } from './escrow.ts'
 import {
+  activeWindow,
+  bountiesPaid,
+  listGrants,
+  listWindows,
+  openWindow,
+  payGrant,
+  paySettlementSubsidy,
+  type EngagementGrant,
+  type EngagementWindow,
+} from './engagement.ts'
+import {
   FrozenError,
   ListingError,
   ListingStateError,
@@ -690,6 +701,14 @@ function buildRoutes(): Route[] {
         return errorReply(403, 'policy_denied', verdict.reasons.join(', ') || 'refused by policy', ctx.requestId)
       }
 
+      // ── docs/ecosystem/21 §5: a zero-fee listing window. The waiver rides the fee rate this
+      //    service ALREADY snapshots per listing, so settlement's arithmetic is untouched — and
+      //    the listing remembers the window and the rate so the subsidy can be FUNDED out of
+      //    `engagement:market` at settlement rather than merely forgone. At most one window can
+      //    be live (`engagement_windows_no_overlap`), so this is one row or none.
+      const window = await activeWindow(deps.sql, deps.now ? deps.now() : new Date())
+      const waived = window !== null && deps.platformFeeBps > 0
+
       return withIdempotentRoute(ctx, deps, '/v1/listings', body, async () => {
         const listing = await createListing(deps.sql, deps.producer, {
           sellerSubject: seller,
@@ -709,7 +728,9 @@ function buildRoutes(): Route[] {
           settlementMode,
           royaltyBps: readBps(body['royaltyBps'] ?? 0),
           // Snapshotted from the environment, not read at settlement. See listings.ts.
-          platformFeeBps: deps.platformFeeBps,
+          platformFeeBps: waived ? 0 : deps.platformFeeBps,
+          engagementWindowId: waived ? window!.id : null,
+          engagementWaivedFeeBps: waived ? deps.platformFeeBps : null,
           disputeWindowMs: settlementMode === 'custodial' ? deps.disputeWindowMs : 0,
           auctionEndsAt: readDate(body['auctionEndsAt']),
           expiresAt: readDate(body['expiresAt']),
@@ -790,7 +811,23 @@ function buildRoutes(): Route[] {
         actor: actorOf(principal),
         correlationId: ctx.requestId,
       })
-      return { status: 200, body: { listing: listingWire(listing) } }
+
+      // ── docs/ecosystem/21 §5: the first-N-listing bounty, paid on ACTIVATION rather than on
+      //    the draft — a draft holds nothing and sells nothing, so a bounty for one would pay
+      //    for an intention. Best-effort by design: a bounty that cannot be paid must never stop
+      //    a seller listing, and the failure is recorded rather than raised. The grant's natural
+      //    key and its ledger idempotency key are both the LISTING, so a retry pays once.
+      const bounty = await payListingBounty(deps, listing, ctx.requestId).catch((err: unknown) => {
+        ctx.log.warn('a listing bounty could not be paid; the listing is unaffected', {
+          listingId: listing.id,
+          err,
+        })
+        return null
+      })
+      return {
+        status: 200,
+        body: { listing: listingWire(listing), bounty: bounty ? grantWire(bounty) : null },
+      }
     }),
 
     define('DELETE', '/v1/listings/:id', async (ctx, deps) => {
@@ -855,6 +892,8 @@ function buildRoutes(): Route[] {
             source: 'purchase',
             settlement_mode: result.order.settlementMode,
           })
+          // 21 §5: the waived fee is funded out of engagement:market AFTER the sale commits.
+          await subsidiseIfWaived(deps, result.listing, result.order.amount, ctx.requestId, ctx.log)
         }
         return {
           response: { order: orderWire(result.order), replayed: result.replayed },
@@ -976,6 +1015,8 @@ function buildRoutes(): Route[] {
             source: 'offer',
             settlement_mode: result.order.settlementMode,
           })
+          // 21 §5: the waived fee is funded out of engagement:market AFTER the sale commits.
+          await subsidiseIfWaived(deps, result.listing, result.order.amount, ctx.requestId, ctx.log)
         }
         return {
           response: { order: orderWire(result.order), replayed: result.replayed },
@@ -1194,6 +1235,108 @@ async function withIdempotentRoute(
 }
 
 /* ------------------------------------------------------------------ wire shapes */
+
+/**
+ * Pay the first-N-listing bounty, if a window is running one and this listing qualifies.
+ *
+ * "First N" is counted per WINDOW, not per seller: the point is to make the room look inhabited
+ * quickly, and a per-seller count would let one seller drain the whole bounty budget by listing N
+ * times. `bountiesPaid` reads the count and `engagement_windows_within_budget` is what actually
+ * bounds the spend — the count can race, the budget cannot.
+ *
+ * Returns null whenever nothing is owed, which includes the retry path: the grant's natural key
+ * is `(kind, listing)`, so a second activation of one listing finds the grant and pays nothing.
+ */
+async function payListingBounty(
+  deps: ServerDeps,
+  listing: Listing,
+  correlationId: string,
+): Promise<EngagementGrant | null> {
+  const windowId = listing.engagementWindowId
+  if (!windowId) return null
+  const window = (await listWindows(deps.sql, 50)).find((w) => w.id === windowId)
+  if (!window || window.bountyShards <= 0n) return null
+  if ((await bountiesPaid(deps.sql, windowId)) >= window.bountyMaxListings) return null
+
+  return payGrant(
+    { sql: deps.sql, ledger: deps.orders.ledger },
+    {
+      windowId,
+      grantKind: 'first_listing_bounty',
+      listingId: listing.id,
+      amountShards: window.bountyShards,
+      // The SELLER. Never a buyer and never a bid — 21 §5's "never ghost demand", which the
+      // schema also refuses at `bids_never_platform_funded`.
+      beneficiary: { subject: listing.sellerSubject, purpose: 'available', type: 'liability' },
+      actor: 'service:market',
+      correlationId,
+      description: `first-listing bounty for listing ${listing.id} (window ${window.name})`,
+    },
+  )
+}
+
+/**
+ * Fund the waived fee after a sale has committed — 21 §5.
+ *
+ * Best-effort on purpose: a buyer's purchase must never fail because a marketing budget ran out.
+ * The sale stands; a failure means the platform rather than the programme bore the fee, and the
+ * absent grant row is what records that.
+ */
+async function subsidiseIfWaived(
+  deps: ServerDeps,
+  listing: Listing,
+  price: bigint,
+  correlationId: string,
+  log: Logger,
+): Promise<void> {
+  if (!listing.engagementWindowId) return
+  await paySettlementSubsidy(
+    { sql: deps.sql, ledger: deps.orders.ledger },
+    {
+      listingId: listing.id,
+      windowId: listing.engagementWindowId,
+      waivedFeeBps: listing.engagementWaivedFeeBps,
+      price,
+      correlationId,
+    },
+  ).catch((err: unknown) => {
+    log.warn('a listing-fee subsidy could not be funded; the sale is unaffected', {
+      listingId: listing.id,
+      err,
+    })
+  })
+}
+
+function grantWire(grant: EngagementGrant): Record<string, unknown> {
+  return {
+    id: grant.id,
+    windowId: grant.windowId,
+    kind: grant.grantKind,
+    beneficiary: grant.beneficiary,
+    listingId: grant.listingId,
+    // A decimal string. A Shard amount fits a double today and an amount that silently loses its
+    // low bits in transit is worse than one that fails to serialise.
+    amountShards: grant.amountShards.toString(),
+    ledgerEntryId: grant.ledgerEntryId,
+    grantedAt: grant.grantedAt.toISOString(),
+  }
+}
+
+function windowWire(window: EngagementWindow): Record<string, unknown> {
+  return {
+    id: window.id,
+    name: window.name,
+    startsAt: window.startsAt.toISOString(),
+    endsAt: window.endsAt.toISOString(),
+    budgetShards: window.budgetShards.toString(),
+    spentShards: window.spentShards.toString(),
+    remainingShards: (window.budgetShards - window.spentShards).toString(),
+    bountyShards: window.bountyShards.toString(),
+    bountyMaxListings: window.bountyMaxListings,
+    createdBy: window.createdBy,
+    createdAt: window.createdAt.toISOString(),
+  }
+}
 
 function listingWire(listing: Listing): Record<string, unknown> {
   return {
