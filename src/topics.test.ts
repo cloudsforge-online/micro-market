@@ -243,34 +243,52 @@ test('the delivery this relay signs is one a contract-following consumer verifie
  * and `revokeAllSessions` update rows without emitting — so `identity.session.revoked` is produced
  * by dead code while identity's own guard passes, because it scans literals rather than
  * reachability. This is the cheapest check that catches that exact shape.
+ *
+ * The detector is exercised on a fixture FIRST. A repository with no exported emitter would
+ * otherwise get a green from a scan that finds nothing because it is broken, which is precisely
+ * the "check that cannot fail" this estate keeps rediscovering.
  */
-test('every exported emitter is reached from somewhere', () => {
-  const declarations: { name: string; where: string }[] = []
-  for (const file of sourceFiles()) {
-    const lines = readFileSync(file, 'utf8').split('\n')
-    lines.forEach((line, index) => {
+function unreachedEmitters(files: readonly { name: string; text: string }[]): readonly string[] {
+  const declared: { symbol: string; where: string }[] = []
+  for (const file of files) {
+    file.text.split('\n').forEach((line, index) => {
       const match = /^export (?:async )?function (emit[A-Za-z0-9_]*)/.exec(line)
-      if (match?.[1]) declarations.push({ name: match[1], where: `${file}:${index + 1}` })
+      if (match?.[1]) declared.push({ symbol: match[1], where: `${file.name}:${index + 1}` })
     })
   }
-  // Non-vacuous: this service has emitters to find.
-  assert.ok(declarations.length > 0, 'no exported emitter was found — the scan is broken')
-
-  const unreached = declarations.filter(({ name }) => {
-    let references = 0
-    for (const file of sourceFiles()) {
-      for (const line of readFileSync(file, 'utf8').split('\n')) {
-        const trimmed = line.trimStart()
-        if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*')) continue
-        if (new RegExp(`\\b${name}\\b`).test(line) && !/^export (?:async )?function /.test(trimmed)) {
-          references += 1
+  return declared
+    .filter(({ symbol }) => {
+      const reference = new RegExp(`\\b${symbol}\\b`)
+      for (const file of files) {
+        for (const line of file.text.split('\n')) {
+          const trimmed = line.trimStart()
+          if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*')) continue
+          if (/^export (?:async )?function /.test(trimmed)) continue
+          if (reference.test(line)) return false
         }
       }
-    }
-    return references === 0
-  })
+      return true
+    })
+    .map(({ symbol, where }) => `${symbol} (${where})`)
+    .sort()
+}
+
+test('the unreachable-emitter detector can actually fail', () => {
+  // identity's defect, reproduced in miniature. Without this the assertion below is worth nothing
+  // in a repository whose emit sites are all inline.
+  const dead = [{ name: 'sessions.ts', text: 'export function emitSessionRevoked(): void {}\n' }]
+  assert.deepEqual(unreachedEmitters(dead), ['emitSessionRevoked (sessions.ts:1)'])
+
+  const alive = [
+    { name: 'sessions.ts', text: 'export function emitSessionRevoked(): void {}\n' },
+    { name: 'server.ts', text: 'emitSessionRevoked()\n' },
+  ]
+  assert.deepEqual(unreachedEmitters(alive), [])
+})
+
+test('every exported emitter is reached from somewhere', () => {
   assert.deepEqual(
-    unreached.map(({ name, where }) => `${name} (${where})`),
+    unreachedEmitters(sourceFiles().map((name) => ({ name, text: readFileSync(name, 'utf8') }))),
     [],
     'exported, emits an event, and no code path reaches it — the topic is produced by dead code',
   )
