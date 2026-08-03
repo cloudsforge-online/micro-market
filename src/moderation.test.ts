@@ -544,6 +544,47 @@ describe('moderation and disputes', { skip }, () => {
     )
   })
 
+  /**
+   * The third instance of the defect that made `market.offer.made` findable, and the one with the
+   * most at stake: opening a dispute FREEZES the listing and holds the seller's payout, and every
+   * subject on the envelope named the person who complained.
+   *
+   * Both directions are exercised on purpose. A counterparty computed as "always the seller" is
+   * right half the time and would pass a one-directional test — and being right half the time
+   * means telling a buyer, in the other half, that their own complaint was made against them.
+   */
+  test('a dispute names the counterparty, in whichever direction it was raised', async () => {
+    const buyerRaised = await settledOrder()
+    await openDispute(h.moderation, {
+      orderId: buyerRaised.order.id,
+      raiserSubject: BUYER,
+      reason: 'never arrived',
+      correlationId: 'r',
+    })
+    const first = await sql<{ actor: string; payload: Record<string, unknown> }[]>`
+      select actor, payload from outbox where topic = 'market.dispute.opened'
+    `
+    assert.equal(first.length, 1)
+    assert.equal(first[0]!.actor, BUYER)
+    assert.equal(first[0]!.payload['raiserSubject'], BUYER)
+    assert.equal(first[0]!.payload['counterpartySubject'], SELLER)
+
+    await sql`delete from outbox`
+    const sellerRaised = await settledOrder()
+    await openDispute(h.moderation, {
+      orderId: sellerRaised.order.id,
+      raiserSubject: SELLER,
+      reason: 'the buyer is charging back',
+      correlationId: 'r',
+    })
+    const second = await sql<{ payload: Record<string, unknown> }[]>`
+      select payload from outbox where topic = 'market.dispute.opened'
+    `
+    assert.equal(second.length, 1)
+    assert.equal(second[0]!.payload['raiserSubject'], SELLER)
+    assert.equal(second[0]!.payload['counterpartySubject'], BUYER)
+  })
+
   test('a case can be found by id after it is opened', async () => {
     const listing = await seedListing(h)
     const opened = await freeze(listing.id)

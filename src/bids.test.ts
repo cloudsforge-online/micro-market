@@ -546,4 +546,80 @@ describe('bids and offers', { skip }, () => {
     // reserved for ever against a listing that no longer exists, and nothing would notice.
     for (const escrow of escrows) assert.equal(escrow.state, 'released')
   })
+
+  /* ------------------------------------------- the party the event is about is not the actor */
+
+  /**
+   * These two read the OUTBOX ROW, and both assert against a concrete third subject rather than
+   * against a shape.
+   *
+   * That is the point rather than a style. The failure this suite is guarding against is a check
+   * that stays green while the payload is wrong, and the estate has just had one: an end-to-end
+   * feed test passed with its classifier deliberately broken, because the payload lacked the
+   * field and **an absent field is `null` to every reader**. So nothing below asserts "there is a
+   * subject" or "it is not null" — each asserts that the value equals a specific person who is
+   * neither the actor nor the payload's other subject, which is false both when the field is
+   * missing (`undefined`) and when it names the wrong one of the two people involved.
+   */
+  test('an offer names the SELLER, who is the person the notification is for', async () => {
+    const listing = await seedListing(h, { pricingMode: 'offers_only', price: null })
+    await makeOffer(h.bids, {
+      listingId: listing.id,
+      offererSubject: BUYER,
+      amount: 800n,
+      actor: BUYER as `user:${string}`,
+      correlationId: 'r',
+    })
+    const rows = await sql<{ actor: string; payload: Record<string, unknown> }[]>`
+      select actor, payload from outbox where topic = 'market.offer.made'
+    `
+    assert.equal(rows.length, 1)
+    const event = rows[0]!
+
+    // Everything else on the envelope names the offerer. `micro-notify` refused to write a rule
+    // for this topic on exactly that ground, and would have had to keep refusing without this
+    // field: the only notification the topic can produce goes to the person who did NOT act.
+    assert.equal(event.actor, BUYER)
+    assert.equal(event.payload['offererSubject'], BUYER)
+    assert.equal(event.payload['sellerSubject'], SELLER)
+    assert.notEqual(event.payload['sellerSubject'], event.payload['offererSubject'])
+  })
+
+  test('a bid names the displaced leader and the seller, neither of whom placed it', async () => {
+    const listing = await auction()
+    await placeBid(h.bids, {
+      listingId: listing.id,
+      bidderSubject: BUYER,
+      amount: 150n,
+      actor: BUYER as `user:${string}`,
+      correlationId: 'r',
+    })
+    await placeBid(h.bids, {
+      listingId: listing.id,
+      bidderSubject: SECOND_BUYER,
+      amount: 250n,
+      actor: SECOND_BUYER as `user:${string}`,
+      correlationId: 'r',
+    })
+    const rows = await sql<{ actor: string; payload: Record<string, unknown> }[]>`
+      select actor, payload from outbox where topic = 'market.bid.placed' order by occurred_at
+    `
+    assert.equal(rows.length, 2)
+
+    // A first bid displaces nobody. Null here is an ABSENCE that the emit site chose, and it is
+    // the only reason the second assertion below is worth anything: a payload that never carried
+    // the field would look exactly like this one for every event.
+    assert.equal(rows[0]!.payload['outbidSubject'], null)
+    assert.equal(rows[0]!.payload['outbidBidId'], null)
+    assert.equal(rows[0]!.payload['sellerSubject'], SELLER)
+
+    const second = rows[1]!
+    assert.equal(second.actor, SECOND_BUYER)
+    assert.equal(second.payload['bidderSubject'], SECOND_BUYER)
+    // The refunded leader. Their money moved back; `outbidBidId` alone is a row id in THIS
+    // service's database, which no consumer can turn into a person.
+    assert.equal(second.payload['outbidSubject'], BUYER)
+    assert.ok(second.payload['outbidBidId'])
+    assert.equal(second.payload['sellerSubject'], SELLER)
+  })
 })

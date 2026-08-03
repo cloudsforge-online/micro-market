@@ -274,6 +274,23 @@ export async function placeBid(deps: BidDeps, input: PlaceBidInput): Promise<Pla
         amount: input.amount.toString(),
         assetCode: listing.assetCode,
         outbidBidId: outbid?.id ?? null,
+        // The two people this event is ABOUT, neither of whom is the actor.
+        //
+        // Found by asking of every topic in this service the question that found the offer defect:
+        // does the envelope name only the person who acted? This one did. `outbidBidId` is a row
+        // id in THIS service's database — a consumer holding it cannot resolve a person from it,
+        // and there is no route that would let it — so the notification this topic's own
+        // quarantine entry gives as its whole reason for existing ("an auction leader was
+        // displaced and refunded; their notification is the only thing that tells them") could not
+        // be written. Their money moved back without anybody being able to say so.
+        //
+        // `sellerSubject` for the same reason as on `market.offer.made` below: a bid on an auction
+        // and an offer on a fixed price are the same fact to a seller, and fixing one of the two
+        // would have been fixing half of one defect. Both are subjects (`user:` or `service:`),
+        // and `outbidSubject` is null exactly when `outbidBidId` is — a first bid displaces
+        // nobody, which is an absence rather than a missing field.
+        outbidSubject: outbid?.bidderSubject ?? null,
+        sellerSubject: listing.sellerSubject,
       },
     })
 
@@ -437,6 +454,27 @@ export async function makeOffer(
         listingId: listing.id,
         offerId: offerRow.id,
         offererSubject: input.offererSubject,
+        // THE PERSON THE NOTIFICATION IS FOR. Everything else on this envelope names the OFFERER:
+        // the actor is them, `offererSubject` is them, and the key is the listing. So the only
+        // subject a consumer could resolve was the person who made the offer, and the one
+        // notification this event exists to produce — "somebody offered on your listing" — would
+        // have gone to the offerer telling them their own offer arrived. `micro-notify` declined
+        // to write a rule for exactly that reason (`UNPRODUCED_NOTIFICATIONS`, "marketplace offer
+        // received", `blockedBy: 'no-subject'`), which was the right refusal: a notification sent
+        // to the wrong person about someone else's money is worse than no notification.
+        //
+        // Read from the listing row this transaction already holds `for update` (line 388), so it
+        // is the seller AT THE MOMENT THE OFFER WAS MADE rather than whoever the listing belongs
+        // to when a consumer gets round to reading it.
+        //
+        // It is a SUBJECT, not a user id — `user:<uuid>` or `service:<name>`, exactly as
+        // `offererSubject` beside it and `sellerSubject` on `market.order.paid_out` already are.
+        // A listing may be owned by a service principal (`server.ts:713` takes the seller from
+        // `subjectOf(principal)`, which spells a service `service:<name>`), and a consumer that
+        // stripped the prefix blindly would address a notification to a service name. Never null
+        // and never empty: `listings.seller_subject` is `not null`, and the self-offer refusal
+        // three lines above proves it is also never the offerer.
+        sellerSubject: listing.sellerSubject,
         amount: input.amount.toString(),
         assetCode: listing.assetCode,
       },

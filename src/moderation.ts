@@ -389,6 +389,19 @@ export async function openDispute(
         disputeId: row.id,
         orderId: order.id,
         raiserSubject: input.raiserSubject,
+        // The other side of the order — the third instance of the defect that made
+        // `market.offer.made` findable, and the one with the most at stake. The actor is the
+        // raiser, `raiserSubject` is the raiser, and the key is the listing, so every subject on
+        // this envelope was the person who complained. The person whose money this event has just
+        // FROZEN (the `update listings set frozen = true` above, and `duePayouts` excluding
+        // disputed orders) was named nowhere on it, and learns about it by finding a payout that
+        // never arrives.
+        //
+        // Derivable rather than guessed: the check five lines above has already established that
+        // the raiser is one of exactly two subjects on this order, so the counterparty is the
+        // other one and there is no third case. A subject, as everywhere else here.
+        counterpartySubject:
+          order.buyer_subject === input.raiserSubject ? order.seller_subject : order.buyer_subject,
         reason: input.reason,
       },
     })

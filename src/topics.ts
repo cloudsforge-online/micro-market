@@ -100,23 +100,26 @@ export interface ProposedTopic {
 export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Object.freeze({
   'market.bid.placed': {
     reason:
-      'An auction leader was displaced and refunded. Their notification is the only thing that tells them, and today nothing can subscribe.',
+      'An auction leader was displaced and refunded. Their notification is the only thing that tells them, and today nothing can subscribe. Until `outbidSubject` was added the payload could not have produced that notification even with a subscriber: it named the displaced bid by ROW ID, which no consumer can turn into a person.',
     spec: {
       producer: 'market',
       payloadType: 'BidPlaced',
       version: '1.0',
       keyedBy: 'listing_id',
-      description: 'A bid was placed on an auction, displacing and refunding the previous leader.',
+      description:
+        'A bid was placed on an auction, displacing and refunding the previous leader. Names the displaced bidder and the seller as well as the bidder.',
     },
   },
   'market.offer.made': {
-    reason: 'A seller with an offer nobody told them about is a sale that does not happen.',
+    reason:
+      'A seller with an offer nobody told them about is a sale that does not happen. `micro-notify` declined to write the rule while the envelope named only the OFFERER — correctly, because a rule keyed to it would have told the offerer their own offer arrived. The payload now carries `sellerSubject` (bids.ts, `makeOffer`), so the rule is writable; the record in notify\'s `UNPRODUCED_NOTIFICATIONS` for "marketplace offer received" is what closes when it is written.',
     spec: {
       producer: 'market',
       payloadType: 'OfferMade',
       version: '1.0',
       keyedBy: 'listing_id',
-      description: 'A buyer made an offer on a listing.',
+      description:
+        'A buyer made an offer on a listing. Carries the seller as well as the offerer: the notification this event exists for goes to the person who did not act.',
     },
   },
   'market.listing.listed': {
@@ -170,7 +173,11 @@ export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Ob
       payloadType: 'DisputeOpened',
       version: '1.0',
       keyedBy: 'listing_id',
-      description: 'A buyer raised a dispute against a settled order, freezing its proceeds.',
+      // "A buyer raised" was wrong and had been since the topic was written: `openDispute` admits
+      // either party and refuses everyone else, which is the reason `counterpartySubject` has to
+      // be computed rather than assumed to be the seller.
+      description:
+        'A buyer or a seller raised a dispute against a settled order, freezing its proceeds. Names the counterparty, whose payout this holds.',
     },
   },
   'market.dispute.resolved': {
