@@ -514,6 +514,36 @@ export async function resolveDispute(
         orderId: order.id,
         resolution: input.resolution,
         reversalEntryId,
+        // THE FOURTH INSTANCE, and the one that made the other three look incomplete.
+        //
+        // The same question was asked of every topic this service emits — "does the envelope name
+        // only the person who acted?" — and this one answered worse than that: it named NOBODY.
+        // The actor is `operator:<id>`, the key is the listing, and the payload was four ids. Two
+        // people have money moving on this event and neither appeared anywhere on it.
+        //
+        // What makes it the worst of the four is the pair it completes. `market.dispute.opened`
+        // above was fixed to carry `counterpartySubject` for one stated reason: the person whose
+        // payout that event FREEZES was learning about it by finding a payout that never arrived.
+        // This is the event that unfreezes it — `refreshFrozen` four lines up, and `duePayouts`
+        // stops excluding the order — and it named them nowhere. So the repair to `opened` had
+        // delivered "your money is frozen" and left the estate unable to ever send the sentence
+        // that ends it. A half-fixed pair reads as fixed from either end alone.
+        //
+        // Both spellings, for the two different readers this event has:
+        //   - `raiserSubject` off the dispute row this transaction holds `for update` (:437), so
+        //     it is the raiser as recorded rather than as re-derived.
+        //   - `counterpartySubject` by the same derivation `openDispute` uses, and legitimate for
+        //     the same reason: `openDispute` admits only the buyer or the seller, so the raiser is
+        //     one of exactly two subjects on this order and the counterparty is the other. There
+        //     is no third case and nothing is being guessed.
+        //
+        // Deliberately NOT "refundedSubject"/"paidSubject". Which one is good news depends on
+        // `resolution`, which is already on the payload; naming the parties by their ROLE IN THE
+        // DISPUTE keeps the one fact in one field and lets a consumer join the two, rather than
+        // encoding the outcome twice in a way that can disagree with itself.
+        raiserSubject: after.raiser_subject,
+        counterpartySubject:
+          order.buyerSubject === after.raiser_subject ? order.sellerSubject : order.buyerSubject,
       },
     })
 

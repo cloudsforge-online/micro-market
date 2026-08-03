@@ -110,18 +110,24 @@ export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Ob
         'A bid was placed on an auction, displacing and refunding the previous leader. Names the displaced bidder and the seller as well as the bidder.',
     },
   },
-  'market.offer.made': {
-    reason:
-      'A seller with an offer nobody told them about is a sale that does not happen. `micro-notify` declined to write the rule while the envelope named only the OFFERER — correctly, because a rule keyed to it would have told the offerer their own offer arrived. The payload now carries `sellerSubject` (bids.ts, `makeOffer`), so the rule is writable; the record in notify\'s `UNPRODUCED_NOTIFICATIONS` for "marketplace offer received" is what closes when it is written.',
-    spec: {
-      producer: 'market',
-      payloadType: 'OfferMade',
-      version: '1.0',
-      keyedBy: 'listing_id',
-      description:
-        'A buyer made an offer on a listing. Carries the seller as well as the offerer: the notification this event exists for goes to the person who did not act.',
-    },
-  },
+  /* ────────────────────────────────────────────────────────────────────────────────────────────
+   * ADOPTED: `market.offer.made`, registered by `micro-contracts` 5e0d11a and therefore deleted
+   * from here — `adoptedProposals()` failed this suite until it was, which is the entire point of
+   * the table. The full round trip took about three hours and is the best evidence the quarantine
+   * is a queue rather than an allow-list:
+   *
+   *   1. `micro-notify` refused the rule, because the envelope named only the offerer. Recorded as
+   *      `blockedBy: 'no-subject'` with an owner, not as an omission.
+   *   2. This service added `sellerSubject` (`bids.ts:477`), read off the `for update` listing row.
+   *   3. `micro-notify` wrote the rule (`catalogue.ts:797`) and quarantined it, copying this
+   *      entry's spec verbatim so the two repositories could not propose two contracts for one
+   *      topic.
+   *   4. `micro-contracts` pasted that spec, re-reading `keyedBy` off `:450` rather than trusting
+   *      it, and both quarantines emptied.
+   *
+   * The registered spec is now the one `topics.test.ts` reconciles against, so nothing here needs
+   * to remember it. Do not re-add an entry for it: `adoptedProposals()` will refuse.
+   * ──────────────────────────────────────────────────────────────────────────────────────────── */
   'market.listing.listed': {
     reason:
       'The other half of market.listing.sold, which IS registered. A registry that names the sale and not the listing gives activity a feed that starts in the middle.',
@@ -135,13 +141,14 @@ export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Ob
   },
   'market.listing.removed': {
     reason:
-      'A cancellation releases escrow. Without the event, a consumer that saw `listed` believes the listing is still live for ever.',
+      'A cancellation releases escrow. Without the event, a consumer that saw `listed` believes the listing is still live for ever. It releases EVERY open bid and offer as well as the item, so `refundedSubjects` names the people whose money came back — they are not the actor, and the actor may be an operator delisting an upheld moderation case rather than the seller at all.',
     spec: {
       producer: 'market',
       payloadType: 'ListingRemoved',
       version: '1.0',
       keyedBy: 'listing_id',
-      description: 'An active listing ended without a sale and its escrow was released.',
+      description:
+        'An active listing ended without a sale. Its item escrow was released, and so was every open bid and offer — each of whose subjects is named.',
     },
   },
   'market.moderation.opened': {
@@ -182,14 +189,14 @@ export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Ob
   },
   'market.dispute.resolved': {
     reason:
-      'THIS is where a refund lives. `resolution` is "refunded" or "upheld" and `reversalEntryId` names the ledger reversal, so a consumer can reconcile the money rather than infer it.',
+      'THIS is where a refund lives. `resolution` is "refunded" or "upheld" and `reversalEntryId` names the ledger reversal, so a consumer can reconcile the money rather than infer it. It is also the event that ENDS the freeze `market.dispute.opened` starts, and it named neither party until `raiserSubject` and `counterpartySubject` were added: the repair to `opened` had made "your payout is frozen" deliverable while leaving the estate unable to ever send the sentence that lifts it.',
     spec: {
       producer: 'market',
       payloadType: 'DisputeResolved',
       version: '1.0',
       keyedBy: 'listing_id',
       description:
-        'A dispute was resolved. Carries the resolution and, for a refund, the reversal entry id.',
+        'A dispute was resolved, unfreezing the order. Carries the resolution, both parties by their role in the dispute, and for a refund the reversal entry id.',
     },
   },
   'market.order.paid_out': {

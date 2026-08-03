@@ -32,7 +32,7 @@
 
 import type { LedgerAssetCode } from '@cloudsforge/contracts-money'
 import { emitOn, type Db, type Emit, type Tx } from './outbox.ts'
-import { holdEscrow, releaseEscrow, type ReleaseDeps } from './escrow.ts'
+import { holdEscrow, releaseEscrow, type EscrowKind, type ReleaseDeps } from './escrow.ts'
 import type { RoyaltyRecipient } from './money.ts'
 import { idempotencyKeys, type LedgerClient } from './ledgerclient.ts'
 
@@ -643,8 +643,12 @@ export async function endListing(
 
     // Every held escrow on this listing, in one pass: the item, and every bid and offer that has
     // not already been released. `for update` on each is inside releaseEscrow.
-    const held = await tx<{ id: string }[]>`
-      select id from escrows where listing_id = ${listing.id} and state = 'held' order by held_at
+    // `subject` and `kind` as well as `id`, so the event below can name the people this refunds.
+    // Read here rather than re-queried after the releases, because `releaseEscrow` moves the rows
+    // out of `state = 'held'` and the same select would then come back empty.
+    const held = await tx<{ id: string; subject: string; kind: EscrowKind }[]>`
+      select id, subject, kind
+        from escrows where listing_id = ${listing.id} and state = 'held' order by held_at
     `
     const releaseDeps: ReleaseDeps = {
       ledger: deps.ledger,
@@ -676,7 +680,40 @@ export async function endListing(
       key: ended.id,
       actor: input.actor,
       correlationId: input.correlationId,
-      payload: { ...listingEventPayload(ended), reason: input.reason },
+      payload: {
+        ...listingEventPayload(ended),
+        reason: input.reason,
+        // THE PEOPLE THIS EVENT REFUNDS, none of whom is the actor.
+        //
+        // The fourth topic found by asking "does the envelope name only the person who acted?".
+        // `listingEventPayload` carries `sellerSubject` and nothing else, and the actor is the
+        // seller — or an OPERATOR, because `resolveCase` calls this to delist an upheld moderation
+        // case, in which case the envelope named nobody with money in it at all.
+        //
+        // Every bidder and offerer on this listing has just had funds released and their
+        // bid marked `lost` or their offer `declined` (the two updates above). That is exactly the
+        // sentence `outbidSubject` was added to `market.bid.placed` for — "their money moved back
+        // without anybody being able to say so" — and it is worse here, because being outbid is at
+        // least a thing that happens inside an auction the bidder is watching, whereas a seller
+        // cancelling underneath them is not.
+        //
+        // A LIST, and it has to be: one cancellation refunds every open bid and offer at once.
+        // The estate already expects producers to carry the affected set rather than have a
+        // consumer reconstruct it — `notify` holds no membership table and says so on its
+        // community rules — so this is the established shape and not a new one.
+        //
+        // `listing_item` is excluded: that escrow's subject is the seller, who is already named as
+        // `sellerSubject` and who did not have money returned so much as an item unlocked. Listing
+        // them here would make the field mean two different things. Deduplicated because one
+        // person may hold both a bid and an offer, and an empty array is the honest answer for a
+        // draft listing or one nobody bid on — never omitted, because a consumer cannot tell an
+        // absent field from an empty one and would have to guess which producer version it has.
+        refundedSubjects: [
+          ...new Set(
+            held.filter((each) => each.kind !== 'listing_item').map((each) => each.subject),
+          ),
+        ],
+      },
     })
     return { value: ended }
   })

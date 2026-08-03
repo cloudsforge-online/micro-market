@@ -26,6 +26,7 @@ import {
   setVerification,
 } from './listings.ts'
 import { escrowsForListing } from './escrow.ts'
+import { placeBid } from './bids.ts'
 import { LedgerRefusedError } from './ledgerclient.ts'
 import {
   BUYER,
@@ -410,6 +411,61 @@ describe('listings', { skip }, () => {
     `
     assert.equal(rows.length, 1)
     assert.equal(rows[0]?.payload['reason'], 'withdrawn by the seller')
+    // A listing nobody bid on refunds nobody. An EMPTY ARRAY and never an absent field: a consumer
+    // cannot tell "nobody" from "this producer predates the field" and would have to guess.
+    assert.deepEqual(rows[0]?.payload['refundedSubjects'], [])
+  })
+
+  /**
+   * The fourth topic found by asking "does the envelope name only the person who acted?".
+   *
+   * A cancellation releases the item escrow AND every open bid and offer, marking the bids `lost`
+   * and the offers `declined`. The payload named `sellerSubject` and nothing else, and the actor is
+   * the seller — or an `operator:` delisting an upheld moderation case, in which case nobody with
+   * money in the listing appeared on the envelope at all. Every bidder's funds moved back and
+   * nothing could say so, which is verbatim the sentence `outbidSubject` was added to
+   * `market.bid.placed` for.
+   */
+  test('a cancellation names every bidder and offerer whose money it refunds', async () => {
+    const listing = await seedListing(h, { pricingMode: 'auction', price: 100n })
+    await placeBid(h.bids, {
+      listingId: listing.id,
+      bidderSubject: BUYER,
+      amount: 500n,
+      actor: BUYER as `user:${string}`,
+      correlationId: 'r',
+    })
+    // A second, higher bid from a DIFFERENT person: the first is refunded as it is outbid, so only
+    // the leader still holds funds at cancellation time. That is what makes this an assertion
+    // about who is actually being refunded rather than about who ever bid.
+    await placeBid(h.bids, {
+      listingId: listing.id,
+      bidderSubject: CREATOR,
+      amount: 900n,
+      actor: CREATOR as `user:${string}`,
+      correlationId: 'r',
+    })
+    await sql`delete from outbox`
+
+    await cancelListing(h.listings, {
+      listingId: listing.id,
+      reason: 'withdrawn with a live auction',
+      actor: 'system',
+      correlationId: 'r',
+    })
+    const rows = await sql<{ payload: Record<string, unknown> }[]>`
+      select payload from outbox where topic = 'market.listing.removed'
+    `
+    assert.equal(rows.length, 1)
+    const refunded = rows[0]?.payload['refundedSubjects']
+    assert.deepEqual(refunded, [CREATOR], 'the leader, whose funds were still held')
+    // The seller is named as `sellerSubject` and must not be doubled in here: the item escrow is
+    // an unlock rather than a refund, and listing them would make one field mean two things.
+    assert.ok(Array.isArray(refunded) && !refunded.includes(SELLER))
+    assert.equal(rows[0]?.payload['sellerSubject'], SELLER)
+    // And every escrow really was released, so the field is describing something that happened.
+    const still = await escrowsForListing(sql, listing.id)
+    assert.equal(still.filter((each) => each.state === 'held').length, 0)
   })
 
   /* ---------------------------------------------------------------- queries */

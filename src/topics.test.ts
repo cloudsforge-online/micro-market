@@ -141,6 +141,10 @@ test('a pending proposal disappears once contracts adopts it', () => {
   // market.listing.sold IS registered, and must therefore NOT be quarantined.
   assert.equal(isRegisteredTopic('market.listing.sold'), true)
   assert.equal(Object.hasOwn(AWAITING_REGISTRATION, 'market.listing.sold'), false)
+  // And the one this mechanism actually emptied, pinned from both ends so a re-add is caught by a
+  // named assertion rather than only by the generic sort above. `micro-contracts` 5e0d11a.
+  assert.equal(isRegisteredTopic('market.offer.made'), true)
+  assert.equal(Object.hasOwn(AWAITING_REGISTRATION, 'market.offer.made'), false)
 })
 
 test('every pending proposal carries a spec that could be pasted into the registry', () => {

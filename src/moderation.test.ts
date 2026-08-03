@@ -585,6 +585,52 @@ describe('moderation and disputes', { skip }, () => {
     assert.equal(second[0]!.payload['counterpartySubject'], BUYER)
   })
 
+  /**
+   * The other half of that pair, which was missing and made the first half read as complete.
+   *
+   * `market.dispute.opened` names the counterparty so the person whose payout it FREEZES can be
+   * told. `market.dispute.resolved` is the event that lifts the freeze — `refreshFrozen`, and
+   * `duePayouts` stops excluding the order — and it named nobody at all: four ids and an
+   * `operator:` actor. So the estate could deliver "your money is held" and had no way, ever, to
+   * deliver the sentence that ends it. A one-ended fix is the failure mode that looks most like a
+   * fix, which is why both directions and both resolutions are driven here.
+   */
+  test('a resolved dispute names both parties, in whichever direction it was raised', async () => {
+    for (const [raiser, counterparty, resolution] of [
+      [BUYER, SELLER, 'refunded'],
+      [SELLER, BUYER, 'upheld'],
+    ] as const) {
+      await sql`delete from outbox`
+      const settled = await settledOrder()
+      const dispute = await openDispute(h.moderation, {
+        orderId: settled.order.id,
+        raiserSubject: raiser,
+        reason: 'r',
+        correlationId: 'r',
+      })
+      await resolveDispute(h.moderation, {
+        disputeId: dispute.id,
+        resolution,
+        resolvedBy: 'ops-1',
+        correlationId: 'r',
+      })
+      const rows = await sql<{ actor: string; payload: Record<string, unknown> }[]>`
+        select actor, payload from outbox where topic = 'market.dispute.resolved'
+      `
+      assert.equal(rows.length, 1)
+      const event = rows[0]!
+      // The actor is the OPERATOR, which is the whole reason neither party can be inferred from
+      // the envelope and both have to be on the payload.
+      assert.equal(event.actor, 'operator:ops-1')
+      assert.equal(event.payload['raiserSubject'], raiser)
+      assert.equal(event.payload['counterpartySubject'], counterparty)
+      assert.notEqual(event.payload['counterpartySubject'], event.payload['raiserSubject'])
+      // The outcome stays in ONE field. A consumer joins `resolution` to the two subjects rather
+      // than reading a second encoding of the same fact that could disagree with the first.
+      assert.equal(event.payload['resolution'], resolution)
+    }
+  })
+
   test('a case can be found by id after it is opened', async () => {
     const listing = await seedListing(h)
     const opened = await freeze(listing.id)

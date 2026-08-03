@@ -463,7 +463,8 @@ export async function makeOffer(
         // received", `blockedBy: 'no-subject'`), which was the right refusal: a notification sent
         // to the wrong person about someone else's money is worse than no notification.
         //
-        // Read from the listing row this transaction already holds `for update` (line 388), so it
+        // Read from the listing row this transaction already holds `for update` (the `select … for
+        // update` that opens this transaction), so it
         // is the seller AT THE MOMENT THE OFFER WAS MADE rather than whoever the listing belongs
         // to when a consumer gets round to reading it.
         //
