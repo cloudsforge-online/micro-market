@@ -23,8 +23,39 @@
  */
 
 import { HttpClient, HttpError } from '@cloudsforge/http'
+import type { Scope } from '@cloudsforge/contracts-auth'
 
-export const POLICY_SCOPES: readonly string[] = Object.freeze(['policy:evaluate'])
+/**
+ * The scopes this service's token must carry to call policy. Named here so the deploy can be
+ * derived from it (`micro-deploy`'s `scripts/derive-grants.mjs`).
+ *
+ * ── IT SAID `policy:evaluate`, AND NO SUCH SCOPE HAS EVER EXISTED ────────────────────────────
+ *
+ * `@cloudsforge/contracts-auth` registers `policy:decide`, and policy gates the only route this
+ * file calls on exactly that: `DECIDE_SCOPE = 'policy:decide'` (`policy/src/server.ts:83`). The
+ * registry was checked on both sides before this line was edited — the report naming it was
+ * treated as a claim, not evidence — and the registry is the correct side.
+ *
+ * The failure mode is not a 403. identity validates `IDENTITY_SERVICE_TOKEN_GRANTS` against the
+ * registry at import and refuses to start on an unknown name, so a deploy that took this constant
+ * at face value would kill the IDENTITY container: not market's policy calls degraded, the whole
+ * estate's token minting gone.
+ *
+ * ── AND THE ANNOTATION IS THE REAL FIX ───────────────────────────────────────────────────────
+ *
+ * `readonly Scope[]`, not `readonly string[]`. `Scope` is `keyof typeof SCOPES` — the registry
+ * itself — so a scope the registry does not have is now a COMPILE ERROR here, in this file, at
+ * the moment it is written. It has to be, because nothing else looks: `service-ci.yml`'s scope
+ * audit reads a repository's INBOUND route gates, and this is an outbound demand. That direction
+ * had never been checked by anything, which is how a misspelling survived the life of the
+ * service. Same shape as the topic registry importing `EventVersion` so a wire version could not
+ * be written as an integer.
+ *
+ * `Scope` still admits a DEPRECATED scope, which identity will not mint either — the registry
+ * exports no live-only type. `scopes.test.ts` covers that at test time and says what
+ * `micro-contracts` would need to export to close it at compile time.
+ */
+export const POLICY_SCOPES: readonly Scope[] = Object.freeze(['policy:decide'])
 
 export type PolicyDecision = 'allow' | 'review' | 'deny'
 

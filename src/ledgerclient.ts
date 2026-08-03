@@ -32,8 +32,20 @@
 import { HttpClient, HttpError } from '@cloudsforge/http'
 import type { Actor, EntryKind, LedgerAssetCode } from '@cloudsforge/contracts-money'
 import type { SaleSplit } from './money.ts'
+import type { Scope } from '@cloudsforge/contracts-auth'
 
-export const LEDGER_SCOPES: readonly string[] = Object.freeze(['ledger:post'])
+/**
+ * The scopes this service's token must carry to call the ledger.
+ *
+ * `ledger:post` alone, and that is the whole of it: this client has exactly one method and it
+ * posts to `POST /entries`, gated on `POST_SCOPE = 'ledger:post'` (`ledger/src/server.ts:78,347`).
+ * Market's escrow is a POSTING to an escrow account, never a ledger reservation — the header
+ * above says so — so `ledger:reserve` would be authority this service has no call site for, and
+ * `ledger:read` likewise: market asks the ledger nothing.
+ *
+ * `readonly Scope[]` rather than `readonly string[]`: see the header of `policyclient.ts`.
+ */
+export const LEDGER_SCOPES: readonly Scope[] = Object.freeze(['ledger:post'])
 
 /**
  * The ledger refused on the state of the world — most often an insufficient balance, which is a
