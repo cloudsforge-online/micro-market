@@ -13,7 +13,7 @@
  *      "version: missing". Every suite in the estate was green throughout, because both sides
  *      tested against imagined counterparts. The only check that could have caught it is the one
  *      below: build an envelope with the relay's own `buildEnvelope` and hand it to the contract's
- *      own `validateEnvelope`.
+ *      own `classifyEnvelope`.
  *
  * No database. Pure text, set arithmetic and one function call, so it runs in CI even when the
  * database-backed suite skips.

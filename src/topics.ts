@@ -30,7 +30,7 @@
  *   2. **At test time, against the source rather than against this list.** `topics.test.ts` reads
  *      every topic literal out of `src/` and reconciles that set with the registry, and it builds
  *      a real envelope through the relay's own `buildEnvelope` and hands it to the contract's own
- *      `validateEnvelope`. A test that compared this list with the registry would agree with
+ *      `classifyEnvelope`. A test that compared this list with the registry would agree with
  *      itself forever while the emit sites drifted underneath it — which is exactly what happened.
  */
 
