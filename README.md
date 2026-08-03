@@ -3,6 +3,8 @@
 Listings, auctions, offers, orders, escrow, royalties, moderation and reversible disputes for the
 Forge Market.
 
+Design authority: [`ecosystem/03-repository-responsibilities.md`](https://github.com/cloudsforge-online/micro-docs/blob/main/ecosystem/03-repository-responsibilities.md)
+
 ```
 pnpm install
 pnpm migrate     # a one-shot job. Never run from the service.
@@ -272,3 +274,10 @@ a listing at 1000 SHARD with a 2.5% fee and a 5% royalty it settles to one balan
 `debit 1000` from the buyer's reserved SHARD against `credit 925 / 25 / 50` to seller, platform and
 creator, plus the item moving from the seller's reserved to the buyer's available in the same entry.
 Both asset codes net to exactly zero.
+
+---
+
+## Provenance
+
+The code in this repository was written by **Claude Opus 5** and **Claude Fable 5**, under
+human direction and review.
