@@ -23,7 +23,7 @@
  */
 
 import { HttpClient, HttpError } from '@cloudsforge/http'
-import type { Scope } from '@cloudsforge/contracts-auth'
+import type { LiveScope } from '@cloudsforge/contracts-auth'
 
 /**
  * The scopes this service's token must carry to call policy. Named here so the deploy can be
@@ -43,19 +43,28 @@ import type { Scope } from '@cloudsforge/contracts-auth'
  *
  * ── AND THE ANNOTATION IS THE REAL FIX ───────────────────────────────────────────────────────
  *
- * `readonly Scope[]`, not `readonly string[]`. `Scope` is `keyof typeof SCOPES` — the registry
- * itself — so a scope the registry does not have is now a COMPILE ERROR here, in this file, at
- * the moment it is written. It has to be, because nothing else looks: `service-ci.yml`'s scope
- * audit reads a repository's INBOUND route gates, and this is an outbound demand. That direction
- * had never been checked by anything, which is how a misspelling survived the life of the
- * service. Same shape as the topic registry importing `EventVersion` so a wire version could not
- * be written as an integer.
+ * `readonly LiveScope[]`, not `readonly string[]`. A scope the registry does not have is a
+ * COMPILE ERROR here, in this file, at the moment it is written. It has to be, because nothing
+ * else looks: `service-ci.yml`'s scope audit reads a repository's INBOUND route gates, and this
+ * is an outbound demand. That direction had never been checked by anything, which is how a
+ * misspelling survived the life of the service. Same shape as the topic registry importing
+ * `EventVersion` so a wire version could not be written as an integer.
  *
- * `Scope` still admits a DEPRECATED scope, which identity will not mint either — the registry
- * exports no live-only type. `scopes.test.ts` covers that at test time and says what
- * `micro-contracts` would need to export to close it at compile time.
+ * ── AND WHY `LiveScope` RATHER THAN `Scope` ──────────────────────────────────────────────────
+ *
+ * The first version of this annotation said `Scope`, and it stopped one step short. `Scope` is
+ * `keyof typeof SCOPES` — EVERY registered key, deprecated ones included — so it caught
+ * `policy:evaluate`, which is not a key, and would not have caught `wallet:provision`, which is.
+ * A deprecated scope is one identity refuses to mint, so declaring one is the same dead identity
+ * container by a different route.
+ *
+ * `LiveScope = Exclude<Scope, DeprecatedScope>` and `DeprecatedScope` is computed FROM `SCOPES`
+ * by a conditional type over the `deprecated` field, not hand-listed, so it cannot drift from the
+ * registry (`contracts/packages/auth/src/index.ts:507`). `Scope` keeps its wide meaning on
+ * purpose: reading a token is wide — one may arrive carrying a scope that has since died — and
+ * demanding is narrow. This is the demanding direction.
  */
-export const POLICY_SCOPES: readonly Scope[] = Object.freeze(['policy:decide'])
+export const POLICY_SCOPES: readonly LiveScope[] = Object.freeze(['policy:decide'])
 
 export type PolicyDecision = 'allow' | 'review' | 'deny'
 

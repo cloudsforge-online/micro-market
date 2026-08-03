@@ -31,7 +31,7 @@
  */
 
 import { HttpClient, HttpError } from '@cloudsforge/http'
-import type { Scope } from '@cloudsforge/contracts-auth'
+import type { LiveScope } from '@cloudsforge/contracts-auth'
 
 /**
  * The scopes this service's token must carry to call the indexer.
@@ -41,10 +41,10 @@ import type { Scope } from '@cloudsforge/contracts-auth'
  * `authoriseRead`, which demands `READ_SCOPE = 'indexer:read'` (`indexer/src/server.ts:89,727`).
  * `indexer:write` gates the watch routes only, and market registers no watches.
  *
- * `readonly Scope[]` rather than `readonly string[]`: see the header of `policyclient.ts`, where
+ * `readonly LiveScope[]` rather than `readonly string[]`: see the header of `policyclient.ts`, where
  * the untyped form let a scope that does not exist sit in this repository unnoticed.
  */
-export const INDEXER_SCOPES: readonly Scope[] = Object.freeze(['indexer:read'])
+export const INDEXER_SCOPES: readonly LiveScope[] = Object.freeze(['indexer:read'])
 
 /** The indexer could not be reached. Soft callers degrade; the on-chain path refuses. */
 export class IndexerUnavailableError extends Error {

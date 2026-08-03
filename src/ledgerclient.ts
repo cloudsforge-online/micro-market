@@ -32,7 +32,7 @@
 import { HttpClient, HttpError } from '@cloudsforge/http'
 import type { Actor, EntryKind, LedgerAssetCode } from '@cloudsforge/contracts-money'
 import type { SaleSplit } from './money.ts'
-import type { Scope } from '@cloudsforge/contracts-auth'
+import type { LiveScope } from '@cloudsforge/contracts-auth'
 
 /**
  * The scopes this service's token must carry to call the ledger.
@@ -43,9 +43,9 @@ import type { Scope } from '@cloudsforge/contracts-auth'
  * above says so — so `ledger:reserve` would be authority this service has no call site for, and
  * `ledger:read` likewise: market asks the ledger nothing.
  *
- * `readonly Scope[]` rather than `readonly string[]`: see the header of `policyclient.ts`.
+ * `readonly LiveScope[]` rather than `readonly string[]`: see the header of `policyclient.ts`.
  */
-export const LEDGER_SCOPES: readonly Scope[] = Object.freeze(['ledger:post'])
+export const LEDGER_SCOPES: readonly LiveScope[] = Object.freeze(['ledger:post'])
 
 /**
  * The ledger refused on the state of the world — most often an insufficient balance, which is a
