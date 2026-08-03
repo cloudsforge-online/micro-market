@@ -223,6 +223,36 @@ test('envelopeDefects excuses a lagging registry and nothing else', () => {
   )
 })
 
+/**
+ * The case that separates this repository's `envelopeDefects` from the contract's own
+ * `envelopeDefects(value, awaitingRegistration)`, which ships beside `classifyEnvelope` and looks
+ * like a drop-in for it.
+ *
+ * "Malformed" and "not in this registry" are two facts with two remedies — a producer bug, and a
+ * missing registration — and an envelope can carry both. `classifyEnvelope` keeps both, deliberately
+ * (`unregisteredTopic` survives on a `malformed` verdict). The contract's flattening wrapper drops
+ * the topic whenever any other defect is present, so the author is sent to fix one thing twice.
+ *
+ * Every other assertion in this suite stays green under that wrapper. This is the only one that
+ * would go red, which is the point of writing it.
+ */
+test('an unproposed topic AND a broken version are reported together, not one per round', () => {
+  const both = {
+    ...buildEnvelope(ROW),
+    topic: 'market.nothing.happened',
+    version: 1 as unknown as string,
+  }
+  const defects = envelopeDefects(both)
+  assert.ok(
+    defects.some((error) => error.startsWith('version:')),
+    `the producer bug must be named: ${defects.join('; ')}`,
+  )
+  assert.ok(
+    defects.some((error) => error.includes('market.nothing.happened')),
+    `the missing registration must be named too: ${defects.join('; ')}`,
+  )
+})
+
 test('the delivery this relay signs is one a contract-following consumer verifies', () => {
   // The other half of the same story: the header name and the signature scheme are the contract's
   // too. Five producers carried drifted local copies (`x-cloudsforge-signature`, `sha256=<hmac>`)
