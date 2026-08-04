@@ -416,10 +416,47 @@ export interface CreateListingInput {
   readonly maxRoyaltyBps: number
   readonly actor: string
   readonly correlationId: string
+  /**
+   * The namespaced key `withIdempotentRoute` claimed for this request, stored ON the listing.
+   *
+   * Optional because the domain does not require it: a caller with no key gets a plain insert and
+   * a NULL, which `listings_idempotency_uniq` is partial to allow. It is supplied by the route so
+   * that a retry the HTTP client made on its own collides in the SCHEMA rather than relying on the
+   * claim row — which, because the claim and the work commit in separate transactions, may not
+   * exist even though the listing does.
+   */
+  readonly idempotencyKey?: string | null
+}
+
+/** The unique index that makes one key mean one listing. Any other 23505 is somebody else's bug. */
+const LISTING_IDEMPOTENCY_CONSTRAINT = 'listings_idempotency_uniq'
+
+/**
+ * The listing a previous attempt under this key already created, if there is one.
+ *
+ * An OPTIMISATION, and nothing more. It saves the loser of a race a wasted INSERT and lets a
+ * retry that arrives after the winner committed take the cheap path. It is emphatically NOT the
+ * thing that prevents the duplicate: two attempts can both read `null` here before either writes,
+ * and a check-then-act built on this alone would admit exactly the second listing this exists to
+ * stop. `listings_idempotency_uniq` is what cannot be raced.
+ */
+export async function findListingByIdempotencyKey(
+  sql: Db | Tx,
+  idempotencyKey: string,
+): Promise<Listing | null> {
+  const rows = await sql<ListingRow[]>`
+    select ${sql.unsafe(LISTING_COLUMNS)} from listings where idempotency_key = ${idempotencyKey}
+  `
+  const row = rows[0]
+  return row ? toListing(row) : null
 }
 
 /**
  * Write a `draft` listing. It holds nothing and sells nothing until `activateListing`.
+ *
+ * Idempotent on `input.idempotencyKey` when one is given: presenting the same key twice returns
+ * the FIRST listing rather than creating a second. See migration 12 for why that belongs here
+ * rather than in the route's claim row.
  */
 export async function createListing(
   sql: Db,
@@ -444,48 +481,103 @@ export async function createListing(
     throw new ListingError('an on-chain listing must name the wallet that owns the item')
   }
 
-  const outcome = await sql.begin(async (tx) => {
-    const recipients =
-      input.royaltyRecipients ??
-      (input.collectionId ? await collectionRoyalties(tx, input.collectionId) : [])
-    if (input.royaltyBps > 0 && recipients.length === 0) {
-      throw new ListingError('a listing with a royalty must say who receives it')
-    }
-    assertRoyalties(recipients)
+  const key = input.idempotencyKey ?? null
 
-    const rows = await tx<ListingRow[]>`
-      insert into listings (
-        seller_subject, seller_wallet_id, collection_id, asset_kind, item_urn, quantity,
-        item_asset_code, pricing_mode, price, reserve_price, asset_code, settlement_mode,
-        royalty_bps, platform_fee_bps, engagement_window_id, engagement_waived_fee_bps,
-        auction_ends_at, expires_at, dispute_window_ms
-      ) values (
-        ${input.sellerSubject}, ${input.sellerWalletId ?? null}, ${input.collectionId ?? null},
-        ${input.assetKind}, ${input.itemUrn}, ${input.quantity.toString()},
-        ${input.itemAssetCode}, ${input.pricingMode},
-        ${input.price === null || input.price === undefined ? null : input.price.toString()},
-        ${input.reservePrice === null || input.reservePrice === undefined ? null : input.reservePrice.toString()},
-        ${input.assetCode}, ${input.settlementMode}, ${input.royaltyBps}, ${input.platformFeeBps},
-        ${input.engagementWindowId ?? null}, ${input.engagementWaivedFeeBps ?? null},
-        ${input.auctionEndsAt ?? null}, ${input.expiresAt ?? null}, ${String(input.disputeWindowMs)}
-      )
-      returning ${tx.unsafe(LISTING_COLUMNS)}
-    `
-    const row = rows[0]
-    if (!row) throw new ListingError('the listing was not written')
-    for (const recipient of recipients) {
-      await tx`
-        insert into listing_royalties (listing_id, subject, bps)
-        values (${row.id}, ${recipient.subject}, ${recipient.bps})
+  // The cheap path, and only that. A retry that arrives after the winner committed is answered
+  // without touching the table. A retry that arrives BEFORE it committed reads null here and falls
+  // through to the INSERT, where the index stops it — which is the case that matters and the case
+  // a lookup can never handle on its own.
+  if (key !== null) {
+    const prior = await findListingByIdempotencyKey(sql, key)
+    if (prior) return prior
+  }
+
+  let outcome: { value: Listing }
+  try {
+    outcome = await sql.begin(async (tx) => {
+      const recipients =
+        input.royaltyRecipients ??
+        (input.collectionId ? await collectionRoyalties(tx, input.collectionId) : [])
+      if (input.royaltyBps > 0 && recipients.length === 0) {
+        throw new ListingError('a listing with a royalty must say who receives it')
+      }
+      assertRoyalties(recipients)
+
+      const rows = await tx<ListingRow[]>`
+        insert into listings (
+          seller_subject, seller_wallet_id, collection_id, asset_kind, item_urn, quantity,
+          item_asset_code, pricing_mode, price, reserve_price, asset_code, settlement_mode,
+          royalty_bps, platform_fee_bps, engagement_window_id, engagement_waived_fee_bps,
+          auction_ends_at, expires_at, dispute_window_ms, idempotency_key
+        ) values (
+          ${input.sellerSubject}, ${input.sellerWalletId ?? null}, ${input.collectionId ?? null},
+          ${input.assetKind}, ${input.itemUrn}, ${input.quantity.toString()},
+          ${input.itemAssetCode}, ${input.pricingMode},
+          ${input.price === null || input.price === undefined ? null : input.price.toString()},
+          ${input.reservePrice === null || input.reservePrice === undefined ? null : input.reservePrice.toString()},
+          ${input.assetCode}, ${input.settlementMode}, ${input.royaltyBps}, ${input.platformFeeBps},
+          ${input.engagementWindowId ?? null}, ${input.engagementWaivedFeeBps ?? null},
+          ${input.auctionEndsAt ?? null}, ${input.expiresAt ?? null}, ${String(input.disputeWindowMs)},
+          ${key}
+        )
+        returning ${tx.unsafe(LISTING_COLUMNS)}
       `
-    }
-    return { value: toListing(row) }
-  })
+      const row = rows[0]
+      if (!row) throw new ListingError('the listing was not written')
+      for (const recipient of recipients) {
+        await tx`
+          insert into listing_royalties (listing_id, subject, bps)
+          values (${row.id}, ${recipient.subject}, ${recipient.bps})
+        `
+      }
+      return { value: toListing(row) }
+    })
+  } catch (err) {
+    // OUTSIDE the transaction, deliberately. A 23505 aborts the transaction it was raised in, so
+    // the re-read cannot happen on `tx` — every statement there would fail with 25P02. Catching
+    // out here means the read runs on a healthy connection, and it means the read happens only
+    // after the winner's transaction has ended, so what it finds is committed rather than in
+    // flight. The same structure as `custody/src/keys.ts:239`.
+    const replayed = await afterLosingTheRace(sql, key, err)
+    if (replayed) return replayed
+    throw err
+  }
   // No outbox event for a draft. Nothing outside this service can act on a listing that is not
   // open for business, and an event for a state nobody may buy from is noise that a consumer has
   // to learn to ignore — which is how a consumer learns to ignore the one that matters.
   void producer
   return outcome.value
+}
+
+/**
+ * What to do when the database refused the insert because somebody else got there first.
+ *
+ * ONLY `listings_idempotency_uniq` is treated this way, BY NAME. Any other 23505 on this table is
+ * a different invariant being violated and is re-thrown, because swallowing it would return a
+ * listing that has nothing to do with the request — the caller would believe its item is for sale
+ * when what is for sale is somebody else's.
+ *
+ * A violation proves the winner committed, so failing to read it back afterwards is impossible. It
+ * is reported loudly rather than absorbed, because the only alternative to knowing which listing
+ * won is writing a second one.
+ */
+async function afterLosingTheRace(
+  sql: Db,
+  key: string | null,
+  err: unknown,
+): Promise<Listing | null> {
+  if (key === null) return null
+  const violation = err as { code?: unknown; constraint_name?: unknown }
+  if (violation.code !== '23505') return null
+  if (violation.constraint_name !== LISTING_IDEMPOTENCY_CONSTRAINT) return null
+
+  const winner = await findListingByIdempotencyKey(sql, key)
+  if (!winner) {
+    throw new ListingError(
+      `a listing lost a race to ${LISTING_IDEMPOTENCY_CONSTRAINT} but the winning row could not be read back`,
+    )
+  }
+  return winner
 }
 
 export async function listingRoyalties(

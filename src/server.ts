@@ -709,8 +709,13 @@ function buildRoutes(): Route[] {
       const window = await activeWindow(deps.sql, deps.now ? deps.now() : new Date())
       const waived = window !== null && deps.platformFeeBps > 0
 
-      return withIdempotentRoute(ctx, deps, '/v1/listings', body, async () => {
+      return withIdempotentRoute(ctx, deps, '/v1/listings', body, async (storedKey) => {
         const listing = await createListing(deps.sql, deps.producer, {
+          // Stored on the listing itself. The claim row in `idempotency_keys` commits in a
+          // DIFFERENT transaction from this insert, so it can be rolled back while the listing
+          // survives; `listings_idempotency_uniq` is what makes the retry that follows find this
+          // listing rather than write a second one for the same item.
+          idempotencyKey: storedKey,
           sellerSubject: seller,
           sellerWalletId: typeof body['sellerWalletId'] === 'string' ? body['sellerWalletId'] : null,
           collectionId: typeof body['collectionId'] === 'string' ? body['collectionId'] : null,
@@ -1208,7 +1213,7 @@ async function withIdempotentRoute(
   deps: ServerDeps,
   route: string,
   fingerprintSubject: Record<string, unknown>,
-  run: () => Promise<{ response: Record<string, unknown>; artefactId: string | null }>,
+  run: (storedKey: string) => Promise<{ response: Record<string, unknown>; artefactId: string | null }>,
 ): Promise<Reply> {
   const key = headerOf(ctx.req, IDEMPOTENCY_HEADER)
   if (!key || !SAFE_IDEMPOTENCY_KEY.test(key)) {
@@ -1221,8 +1226,16 @@ async function withIdempotentRoute(
     route,
     clientKey: key,
     requestHash: requestFingerprint(fingerprintSubject),
-    run: async () => {
-      const { response, artefactId } = await run()
+    // The `tx` is still discarded, and that is a deliberate choice rather than an oversight. Four
+    // of these routes call the LEDGER over HTTP inside `run`, and threading the claim transaction
+    // through them would hold a Postgres transaction open across a network round trip — a worse
+    // defect than the one being closed. What is threaded instead is the STORED KEY, so the work
+    // can put the invariant in its own schema, where a lost claim row cannot undo it. Every
+    // artefact these routes write now has a natural unique key: orders_listing_uniq,
+    // bids_leading_uniq, offers_open_uniq, disputes_open_uniq, moderation_open_freeze_uniq, and —
+    // as of migration 12 — listings_idempotency_uniq, which was the one that was missing.
+    run: async (_tx, storedKey) => {
+      const { response, artefactId } = await run(storedKey)
       return { response, artefactId }
     },
   })

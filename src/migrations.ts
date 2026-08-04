@@ -826,6 +826,62 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 12,
+    name: 'listing_idempotency',
+    up: `
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+      -- ONE KEY, ONE LISTING — the natural key that 'listings' was the only artefact to lack.
+      --
+      -- '@cloudsforge/http' retries a POST as soon as the caller supplies an idempotency key
+      -- (runtime/packages/http/src/index.ts:221). That rule infers retry-safety from the CALLER's
+      -- intent rather than from the SERVER's capability, which the client cannot know — so every
+      -- 'POST /v1/listings' this estate makes (tessera/src/marketclient.ts:145) is retried
+      -- automatically whenever a response is lost, and a lost response on a call that SUCCEEDED
+      -- is the ordinary case rather than an exotic one.
+      --
+      -- 'withIdempotentRoute' (server.ts) was supposed to absorb that and did not, quite: its
+      -- callback discards the transaction 'withIdempotency' hands it, and 'createListing' then
+      -- opens one of its own. The claim and the work therefore commit SEPARATELY, breaking the
+      -- property idempotency.ts:9-13 asserts. Lose the connection in between and the listing is
+      -- durable while the claim row is not — and the automatic retry writes a SECOND listing.
+      --
+      -- Six sibling routes split their transactions identically and are HARMLESS, because the
+      -- artefact each writes already collides with itself: orders_listing_uniq (:507),
+      -- bids_leading_uniq (:438), offers_open_uniq (:467), disputes_open_uniq (:632),
+      -- moderation_open_freeze_uniq (:602). 'listings' had no natural key at all, which is
+      -- precisely why the escape was reachable there and nowhere else.
+      --
+      -- So this is not a restructuring of those transactions. Holding a claim open across
+      -- 'settleSale's HTTP call to the ledger would be a database transaction waiting on the
+      -- network, which is a worse defect than the one being fixed. It gives 'listings' the
+      -- natural key its six siblings already had, and leaves the transactions alone.
+      --
+      -- THE INDEX IS THE CORRECTNESS PATH, NOT THE LOOKUP. 'findListingByIdempotencyKey' exists
+      -- only to save the loser a wasted INSERT; a check-then-act that consulted it and then wrote
+      -- would still admit the duplicate, because the two requests can both read "nothing there"
+      -- before either writes. The 23505 is what cannot be raced.
+      --
+      -- The same shape one layer down in the ledger — journal_entries_idempotency_key_uniq
+      -- beside idempotency_keys.key, two independent invariants describing one thing
+      -- (ledger/src/idempotency.ts:99-108) — and the same shape custody's migration 6 gave
+      -- custody_keys.
+      --
+      -- PARTIAL, ON PURPOSE, and for the reason custody excluded 'treasury' from its binding
+      -- index: check the case where two requests are MEANT to be distinct before making them
+      -- one. A seller may list the same item twice — a second copy, a relist after a cancel —
+      -- and does so under a fresh key or none. A NULL key must therefore never collide with
+      -- another NULL key. It also means every listing already in the table when this runs keeps
+      -- its NULL and is not retroactively constrained against its neighbours, so the migration
+      -- cannot fail on existing data.
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+      alter table listings add column if not exists idempotency_key text;
+
+      create unique index if not exists listings_idempotency_uniq
+        on listings (idempotency_key)
+        where idempotency_key is not null;
+    `,
+  },
 ]
 
 /**
