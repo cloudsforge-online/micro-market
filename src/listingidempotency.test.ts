@@ -66,7 +66,11 @@ import {
 } from './listings.ts'
 import { CREATOR, SELLER, harness, migrateTestDb, openDb, resetMarket, skip, type Harness } from './testsupport.ts'
 
-const KEY = 'market:/v1/listings:tessera-issue-ashvale-01'
+// Spelled the way `withIdempotentRoute` spells it: service, route, PRINCIPAL, then the client's
+// key. The principal is what stops one seller's key resolving to another's listing, and it is part
+// of this string rather than beside it — so `listings_idempotency_uniq` is per seller for free.
+// See `callerscoping.test.ts`.
+const KEY = `market:/v1/listings:${SELLER}|tessera-issue-ashvale-01`
 
 function listingInput(overrides: Partial<CreateListingInput> = {}): CreateListingInput {
   return {

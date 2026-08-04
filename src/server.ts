@@ -709,7 +709,7 @@ function buildRoutes(): Route[] {
       const window = await activeWindow(deps.sql, deps.now ? deps.now() : new Date())
       const waived = window !== null && deps.platformFeeBps > 0
 
-      return withIdempotentRoute(ctx, deps, '/v1/listings', body, async (storedKey) => {
+      return withIdempotentRoute(ctx, deps, principal, '/v1/listings', body, async (storedKey) => {
         const listing = await createListing(deps.sql, deps.producer, {
           // Stored on the listing itself. The claim row in `idempotency_keys` commits in a
           // DIFFERENT transaction from this insert, so it can be rolled back while the listing
@@ -883,7 +883,7 @@ function buildRoutes(): Route[] {
       const listingId = itemIdOf(ctx)
       const body = await readJson(ctx.req)
 
-      return withIdempotentRoute(ctx, deps, '/v1/listings/:id/buy', { listingId, ...body }, async () => {
+      return withIdempotentRoute(ctx, deps, principal, '/v1/listings/:id/buy', { listingId, ...body }, async () => {
         const result = await settleSale(deps.orders, {
           listingId,
           buyerSubject: subjectOf(principal),
@@ -930,7 +930,7 @@ function buildRoutes(): Route[] {
       const listingId = itemIdOf(ctx)
       const body = await readJson(ctx.req)
 
-      return withIdempotentRoute(ctx, deps, '/v1/listings/:id/bids', { listingId, ...body }, async () => {
+      return withIdempotentRoute(ctx, deps, principal, '/v1/listings/:id/bids', { listingId, ...body }, async () => {
         const result = await placeBid(deps.bids, {
           listingId,
           bidderSubject: subjectOf(principal),
@@ -965,7 +965,7 @@ function buildRoutes(): Route[] {
       const listingId = itemIdOf(ctx)
       const body = await readJson(ctx.req)
 
-      return withIdempotentRoute(ctx, deps, '/v1/listings/:id/offers', { listingId, ...body }, async () => {
+      return withIdempotentRoute(ctx, deps, principal, '/v1/listings/:id/offers', { listingId, ...body }, async () => {
         const offer = await makeOffer(deps.bids, {
           listingId,
           offererSubject: subjectOf(principal),
@@ -1004,7 +1004,7 @@ function buildRoutes(): Route[] {
       }
       if (offer.status !== 'open') throw new ListingStateError(`this offer is ${offer.status}`)
 
-      return withIdempotentRoute(ctx, deps, '/v1/offers/:id/accept', { offerId }, async () => {
+      return withIdempotentRoute(ctx, deps, principal, '/v1/offers/:id/accept', { offerId }, async () => {
         const result = await settleSale(deps.orders, {
           listingId: offer.listingId,
           buyerSubject: offer.offererSubject,
@@ -1067,7 +1067,7 @@ function buildRoutes(): Route[] {
       // whose response it never saw, opened TWO disputes on one order and froze the listing
       // twice. Found by micro-sdk while cataloguing which public routes require an
       // Idempotency-Key: the answer for this one was "none", and it should never have been.
-      return withIdempotentRoute(ctx, deps, '/v1/orders/:id/disputes', { orderId, ...body }, async () => {
+      return withIdempotentRoute(ctx, deps, principal, '/v1/orders/:id/disputes', { orderId, ...body }, async () => {
         const dispute = await openDispute(deps.moderation, {
           orderId,
           raiserSubject: subjectOf(principal),
@@ -1135,7 +1135,7 @@ function buildRoutes(): Route[] {
       // subject and an operator queue grows duplicates of the thing it exists to surface once.
       // Same shape as the dispute route above, found while auditing which mutating routes were
       // unwrapped.
-      return withIdempotentRoute(ctx, deps, '/v1/moderation/cases', body, async () => {
+      return withIdempotentRoute(ctx, deps, principal, '/v1/moderation/cases', body, async () => {
         const opened = await openCase(deps.moderation, {
           subjectKind: requireString(body, 'subjectKind') as CaseSubjectKind,
           subjectUrn: requireString(body, 'subjectUrn'),
@@ -1198,7 +1198,8 @@ function buildRoutes(): Route[] {
 /* ------------------------------------------------------------------ the idempotency wrapper */
 
 /**
- * Wrap a mutating route in `withIdempotency`, keyed on the `Idempotency-Key` header.
+ * Wrap a mutating route in `withIdempotency`, keyed on the `Idempotency-Key` header AND on the
+ * authenticated caller.
  *
  * The header is **required**. Making it optional would mean the safe path is the one a client has
  * to remember, and the unsafe one is the default — which on a marketplace means a double-clicked
@@ -1207,10 +1208,19 @@ function buildRoutes(): Route[] {
  * The fingerprint is taken over the request body plus the path parameters, so the same key
  * presented against a different listing is caught rather than replayed. `correlationId` is
  * excluded inside `requestFingerprint`; see its header for the defect that taught us.
+ *
+ * **THE PRINCIPAL IS A PARAMETER, NOT A LOOKUP.** It is `subjectOf(principal)` — the same subject
+ * the work below records as `sellerSubject`, `buyerSubject`, `bidderSubject`, `offererSubject` or
+ * `raiserSubject`. It used to be used only inside `run`, so the claim was namespaced by
+ * `deps.producer` — which names *market itself* — and every principal on the estate shared one key
+ * space: two sellers with one key and one body, and the second was replayed the first's listing.
+ * Passing it explicitly means a route added tomorrow cannot forget it, because there is nothing to
+ * forget: the argument is required and it does not compile without one.
  */
 async function withIdempotentRoute(
   ctx: RequestContext,
   deps: ServerDeps,
+  principal: Principal,
   route: string,
   fingerprintSubject: Record<string, unknown>,
   run: (storedKey: string) => Promise<{ response: Record<string, unknown>; artefactId: string | null }>,
@@ -1224,6 +1234,7 @@ async function withIdempotentRoute(
   const outcome = await withIdempotency<Record<string, unknown>>(deps.sql, {
     originatingService: deps.producer,
     route,
+    principal: subjectOf(principal),
     clientKey: key,
     requestHash: requestFingerprint(fingerprintSubject),
     // The `tx` is still discarded, and that is a deliberate choice rather than an oversight. Four

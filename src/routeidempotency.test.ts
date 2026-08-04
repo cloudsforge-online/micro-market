@@ -79,6 +79,29 @@ test('the checker sees the routes at all', () => {
   assert.ok(routes.some((r) => r.wrapped), 'no route was detected as wrapped — the detector is broken')
 })
 
+test('every wrapped route scopes its key to the AUTHENTICATED caller', () => {
+  // The type system already refuses a call with no principal — the parameter is required. What it
+  // cannot refuse is the WRONG principal: `subjectOf` is also applied to listing owners and offer
+  // makers a few lines away in three of these handlers, and a route that scoped its key to the
+  // SELLER of the listing being bought would compile, pass every behavioural test written from one
+  // caller's point of view, and put two buyers back in one namespace.
+  //
+  // So this pins the argument as written: the third argument is the `principal` this handler
+  // authenticated, and nothing else.
+  // `(\w+)` rather than `([^,]+)`: the declaration a few hundred lines below spreads its typed
+  // parameters over several lines, and a looser pattern matches the declaration as well as the
+  // calls and then fails on its own signature.
+  const calls = [...SERVER.matchAll(/withIdempotentRoute\((\w+), (\w+), (\w+),/g)]
+  assert.ok(calls.length >= 7, `expected every wrapped route to be found, saw ${calls.length}`)
+  for (const call of calls) {
+    assert.deepEqual(
+      [call[1], call[2], call[3]],
+      ['ctx', 'deps', 'principal'],
+      `a wrapped route is keyed on ${call[3]} rather than on the caller it authenticated`,
+    )
+  }
+})
+
 test('no exemption is stale', () => {
   // An exemption for a route that no longer exists is a claim nobody is checking, and it hides the
   // day that route comes back without a wrapper.

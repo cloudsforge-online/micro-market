@@ -432,6 +432,11 @@ export function fakeVerifier(): { principal(token: string): Promise<Principal> }
       if (token === 'bob') return { kind: 'user', userId: BOB, handle: 'bob', roles: ['player'] }
       if (token === 'carol') return { kind: 'user', userId: CAROL, handle: 'carol', roles: ['player'] }
       if (token === 'admin') return { kind: 'user', userId: 'ops-1', handle: 'ops', roles: ['admin'] }
+      // A SECOND operator, because one operator cannot show that two of them are told apart.
+      // `/v1/moderation/cases` runs the same idempotency wrapper as the six other mutating routes,
+      // and the key it claims must belong to the operator who presented it — see
+      // `callerscoping.test.ts`.
+      if (token === 'admin2') return { kind: 'user', userId: 'ops-2', handle: 'ops2', roles: ['admin'] }
       const { TokenError } = await import('@cloudsforge/auth')
       throw new TokenError('unknown token', 'invalid')
     },

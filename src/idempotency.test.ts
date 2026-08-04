@@ -81,18 +81,52 @@ test('arrays keep their order — a royalty split is not a set', () => {
   )
 })
 
-test('the namespaced key is scoped by service AND route', () => {
-  assert.equal(namespacedKey('market', '/v1/listings', 'abc'), 'market:/v1/listings:abc')
+test('the namespaced key is scoped by service, route AND principal', () => {
+  assert.equal(
+    namespacedKey('market', '/v1/listings', 'user:alice', 'abc'),
+    'market:/v1/listings:user:alice|abc',
+  )
   // The same client key on two routes describes two operations, and a caller reusing its request
   // id across both is doing something reasonable.
   assert.notEqual(
-    namespacedKey('market', '/v1/listings', 'abc'),
-    namespacedKey('market', '/v1/listings/:id/buy', 'abc'),
+    namespacedKey('market', '/v1/listings', 'user:alice', 'abc'),
+    namespacedKey('market', '/v1/listings/:id/buy', 'user:alice', 'abc'),
   )
   assert.notEqual(
-    namespacedKey('market', '/v1/listings', 'abc'),
-    namespacedKey('trade', '/v1/listings', 'abc'),
+    namespacedKey('market', '/v1/listings', 'user:alice', 'abc'),
+    namespacedKey('trade', '/v1/listings', 'user:alice', 'abc'),
   )
+})
+
+test('TWO CALLERS CHOOSING ONE KEY DO NOT COLLIDE — the defect, at its smallest', () => {
+  // The route and the client key are identical and so is the body. Only the caller differs, and
+  // that has to be enough, because callers choose their own keys and do not coordinate. Before
+  // this argument existed, these two strings were the same one and the second caller was replayed
+  // the first caller's answer.
+  assert.notEqual(
+    namespacedKey('market', '/v1/listings', 'user:alice', 'sha256-of-the-payload'),
+    namespacedKey('market', '/v1/listings', 'user:bob', 'sha256-of-the-payload'),
+  )
+})
+
+test('a principal cannot be spelled to look like somebody else’s principal-plus-key', () => {
+  // The injectivity argument, pinned. A client key may contain colons (`SAFE_IDEMPOTENCY_KEY`),
+  // and a principal is a token subject, so a `:` between them would let `user:a` + `b:cccccccc`
+  // and `user:a:b` + `cccccccc` produce one string — the very collision this scoping removes,
+  // reintroduced by punctuation. The delimiter is outside the client-key charset instead.
+  assert.notEqual(
+    namespacedKey('market', '/v1/listings', 'user:a', 'b:cccccccc'),
+    namespacedKey('market', '/v1/listings', 'user:a:b', 'cccccccc'),
+  )
+})
+
+test('a key written before this change can never resolve against one written after it', () => {
+  // The transition, such as it is. The legacy format is `market:<route>:<clientKey>` and contains
+  // no `|`; every key this function now returns contains one. So the clean break is genuinely
+  // clean in the direction that matters: nothing stale is ever mistaken for something current.
+  const legacy = 'market:/v1/listings:abc'
+  assert.ok(!legacy.includes('|'))
+  assert.ok(namespacedKey('market', '/v1/listings', 'user:alice', 'abc').includes('|'))
 })
 
 /* ------------------------------------------------------------------ against Postgres */
@@ -113,10 +147,18 @@ describe('withIdempotency, against a real Postgres', { skip }, () => {
     await sql.end({ timeout: 5 })
   })
 
-  const run = (key: string, body: Record<string, unknown>, work: () => Promise<string>) =>
+  const BUYER = 'user:alice'
+
+  const run = (
+    key: string,
+    body: Record<string, unknown>,
+    work: () => Promise<string>,
+    principal = BUYER,
+  ) =>
     withIdempotency<Record<string, unknown>>(db, {
       originatingService: 'market',
       route: '/v1/listings/:id/buy',
+      principal,
       clientKey: key,
       requestHash: requestFingerprint(body),
       run: async () => {
@@ -160,6 +202,26 @@ describe('withIdempotency, against a real Postgres', { skip }, () => {
       run('k1', { amount: '999' }, async () => 'order-2'),
       IdempotencyKeyReuseError,
     )
+  })
+
+  test('TWO PRINCIPALS, ONE KEY, ONE BODY — two runs and two artefacts', async () => {
+    // The same table, the same key, the same fingerprint. Only the caller differs. Before the
+    // principal was part of the namespace this was one row, the second caller's work never ran,
+    // and they were handed `order-1` — an order belonging to somebody else.
+    let calls = 0
+    const work = async () => {
+      calls += 1
+      return `order-${calls}`
+    }
+    const alice = await run('k1', { amount: '100' }, work, 'user:alice')
+    const trade = await run('k1', { amount: '100' }, work, 'service:trade')
+
+    assert.equal(alice.replayed, false)
+    assert.equal(trade.replayed, false, "the second caller was replayed the first caller's answer")
+    assert.notDeepEqual(trade.result, alice.result)
+    assert.equal(calls, 2, "the second caller's work never ran")
+    const rows = await sql<{ n: number }[]>`select count(*)::int as n from idempotency_keys`
+    assert.equal(rows[0]?.n, 2)
   })
 
   test('THE CLAIM AND THE WORK SHARE ONE TRANSACTION — a failure leaves no key behind', async () => {
@@ -211,7 +273,7 @@ describe('withIdempotency, against a real Postgres', { skip }, () => {
     // committed, so the honest answer is "retry" rather than a guess.
     await sql`
       insert into idempotency_keys (key, route, request_hash)
-      values ('market:/v1/listings/:id/buy:k1', '/v1/listings/:id/buy',
+      values (${namespacedKey('market', '/v1/listings/:id/buy', BUYER, 'k1')}, '/v1/listings/:id/buy',
               ${requestFingerprint({ amount: '100' })})
     `
     await assert.rejects(
@@ -223,7 +285,8 @@ describe('withIdempotency, against a real Postgres', { skip }, () => {
   test('the claim row points at what the key produced', async () => {
     await run('k1', { amount: '100' }, async () => 'order-42')
     const rows = await sql<{ artefact_id: string }[]>`
-      select artefact_id from idempotency_keys where key = 'market:/v1/listings/:id/buy:k1'
+      select artefact_id from idempotency_keys
+       where key = ${namespacedKey('market', '/v1/listings/:id/buy', BUYER, 'k1')}
     `
     // The only link between a caller's key and the order it made. Losing it turns "did my retry
     // buy this twice" into an unanswerable question.
@@ -235,6 +298,7 @@ describe('withIdempotency, against a real Postgres', { skip }, () => {
     await withIdempotency(db, {
       originatingService: 'market',
       route: '/v1/listings',
+      principal: BUYER,
       clientKey: 'k2',
       requestHash: 'h2',
       run: async () => ({ response: { ok: true }, artefactId: null }),
@@ -252,6 +316,7 @@ describe('withIdempotency, against a real Postgres', { skip }, () => {
     await withIdempotency(db, {
       originatingService: 'market',
       route: '/v1/listings',
+      principal: BUYER,
       clientKey: 'k2',
       requestHash: 'h2',
       run: async () => ({ response: { ok: true }, artefactId: null }),

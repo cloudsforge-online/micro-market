@@ -25,6 +25,31 @@
  * chosen by callers, and two callers independently choosing `buy-2026-07-31` must not collide.
  *
  * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **AND BY THE PRINCIPAL, WHICH IS THE PART THAT WAS MISSING.**
+ *
+ * `originatingService` names MARKET — it is the constant `SERVICE` from `index.ts`, threaded
+ * through as `deps.producer`. It says which service stored the key, never which caller chose it.
+ * With only the service and the route in the namespace, every principal on the estate shared one
+ * key space, and `idempotency_keys.key` is a bare `text` primary key with no actor column beside
+ * it (`migrations.ts:128`). Two sellers presenting the same key with the same body therefore hit
+ * the replay branch below, and the second was handed the FIRST one's stored response: their
+ * listing was never created and they were told the id of somebody else's.
+ *
+ * The principal goes in the NAMESPACE rather than the fingerprint, and the two are not
+ * interchangeable. In the fingerprint it would make the collision an ERROR — the row exists with a
+ * different hash, so the second caller gets `IdempotencyKeyReuseError`, a 409 about a body they
+ * never sent, and whoever claims a key first can deny it to everybody else. In the namespace the
+ * collision cannot occur at all, which is what an idempotency key means wherever it is done
+ * properly. Making it impossible beats making it an error.
+ *
+ * There is a second reason here specifically: the stored key is handed to `run` and persisted on
+ * the listing, where `listings_idempotency_uniq` (migration 12) makes it unique. Scoping the
+ * fingerprint alone would have left that string shared between two sellers, and the loser's
+ * INSERT would have died on a 23505 against a row it cannot see. One change fixes both layers,
+ * because the layer below is keyed on the very string this one scopes.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
  * **WHAT MAY NOT BE FINGERPRINTED, AND THE DEFECT THAT PROVES IT.**
  *
  * `correlationId` is a trace identifier and it is SUPPOSED to change on every attempt — that is
@@ -102,14 +127,64 @@ function canonicalise(value: unknown): string {
 }
 
 /**
- * The stored key, namespaced by the calling service and the route.
+ * The delimiter between the caller and the key the caller chose.
+ *
+ * A pipe rather than another colon, and this is the whole of the injectivity argument. A client
+ * key MAY contain colons (`SAFE_IDEMPOTENCY_KEY`, `server.ts:260`) and a principal is a token
+ * subject, so with `:` on both sides the principal `user:a` with key `b:cccccccc` and the
+ * principal `user:a:b` with key `cccccccc` would produce one string — which is the cross-caller
+ * collision this function exists to remove, reintroduced by its own punctuation. `|` is outside
+ * the client-key charset, so the LAST `|` always separates the two however either is spelled.
+ *
+ * It also makes the new format visibly distinct from the old one, which is what lets a key
+ * written before this change be told apart from one written after it. See `namespacedKey`.
+ */
+const PRINCIPAL_DELIMITER = '|'
+
+/**
+ * The stored key, namespaced by the calling service, the route, AND the principal.
  *
  * The route is in the key because the same client key presented to `POST /v1/listings` and to
  * `POST /v1/listings/:id/buy` describes two different operations, and a caller reusing its
  * request id across both is doing something reasonable.
+ *
+ * The principal is in it because keys are chosen by callers and callers do not coordinate. See
+ * the header for why this belongs here rather than in the fingerprint.
+ *
+ * ── KEYS IN FLIGHT ACROSS THE DEPLOY, AND WHY THIS IS A CLEAN BREAK ───────────────────────────
+ *
+ * A key claimed before this change is stored as `market:/v1/listings:K` and will never be found
+ * again, because the same request now looks for `market:/v1/listings:user:…|K`. That is deliberate
+ * and it is not fixable by a transition, for a reason worth writing down: THE OLD ROW DOES NOT
+ * RECORD WHOSE IT WAS. `idempotency_keys` has no actor column (`migrations.ts:127-136`), so a
+ * compatibility read that fell back to the legacy key on a miss would be exactly the cross-caller
+ * read being removed here — it would preserve the defect for the length of the transition rather
+ * than close it, and preserve it precisely in the window where two callers are most likely to be
+ * mid-retry at once.
+ *
+ * What the break costs is bounded, and much smaller than that:
+ *
+ *   * a key is only in flight for as long as a client's retry window, and a deploy restarts this
+ *     process anyway, so the exposed set is "requests retried across one restart";
+ *   * six of the seven wrapped routes have an artefact-level natural key that catches a duplicate
+ *     with no claim row at all — `orders_listing_uniq`, `bids_leading_uniq`, `offers_open_uniq`,
+ *     `disputes_open_uniq`, `moderation_open_freeze_uniq`. A lost claim there costs a wasted
+ *     INSERT, not a second order;
+ *   * the seventh, `POST /v1/listings`, is guarded by `listings_idempotency_uniq` on this very
+ *     string — so a retry that crosses the restart writes at most one extra DRAFT listing, which
+ *     holds no reservation and sells nothing until it is activated.
+ *
+ * And the two formats cannot be confused: no legacy key contains a `|`, and every new one does,
+ * so nothing written before this change can ever resolve against something written after it. The
+ * legacy rows are left where they are; the reaper takes them at their TTL.
  */
-export function namespacedKey(originatingService: string, route: string, clientKey: string): string {
-  return `${originatingService}:${route}:${clientKey}`
+export function namespacedKey(
+  originatingService: string,
+  route: string,
+  principal: string,
+  clientKey: string,
+): string {
+  return `${originatingService}:${route}:${principal}${PRINCIPAL_DELIMITER}${clientKey}`
 }
 
 export interface IdempotentOutcome<T> {
@@ -120,6 +195,12 @@ export interface IdempotentOutcome<T> {
 export interface IdempotencyInput<T> {
   readonly originatingService: string
   readonly route: string
+  /**
+   * The authenticated caller, as `user:<id>` or `service:<name>` — `subjectOf(principal)` at every
+   * call site. Required rather than optional: an omitted principal is the defect this parameter
+   * was added to close, and a default would let it back in silently.
+   */
+  readonly principal: string
   readonly clientKey: string
   readonly requestHash: string
   /**
@@ -134,7 +215,7 @@ export async function withIdempotency<T>(
   sql: Db,
   input: IdempotencyInput<T>,
 ): Promise<IdempotentOutcome<T>> {
-  const key = namespacedKey(input.originatingService, input.route, input.clientKey)
+  const key = namespacedKey(input.originatingService, input.route, input.principal, input.clientKey)
 
   const outcome = await sql.begin(async (tx) => {
     const claimed = await tx<{ key: string }[]>`

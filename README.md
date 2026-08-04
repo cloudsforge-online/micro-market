@@ -92,10 +92,35 @@ auction is a test in this repository, not a hope.
 
 ---
 
-## Idempotency, and the regression it is written against
+## Idempotency, and the two defects it is written against
 
 Every mutating route requires an `Idempotency-Key` header, and the claim shares one transaction
-with the work it protects. The fingerprint of the request body **excludes the per-attempt fields**:
+with the work it protects.
+
+### A key belongs to the caller who chose it
+
+The stored key is `market:<route>:<principal>|<client key>`. The principal is the authenticated
+subject — `user:<id>` or `service:<name>` — and it is there because callers choose their own keys
+and do not coordinate. Without it the namespace was `market:<route>:<client key>`, which names
+*this service* rather than the caller, so two sellers who derived their key from the payload — a
+common and defensible reading of what an idempotency key is — collided deterministically, and the
+second was replayed the first's response: their listing was never created and they were handed the
+id of somebody else's.
+
+The principal is in the **namespace** rather than the fingerprint on purpose. In the fingerprint it
+would make the collision an *error*: the second caller gets a 409 about a body they never sent, and
+whoever claims a key first can deny it to everyone else. In the namespace the collision cannot
+happen at all. The stored key is also what lands in `listings.idempotency_key`, under
+`listings_idempotency_uniq`, so scoping the namespace scopes that index to the seller too — the
+fingerprint alternative would have left the loser's INSERT dying on a `23505` against a row it
+cannot see.
+
+The `|` is not decoration: a client key may contain colons, so with a colon on both sides the
+principal `user:a` with key `b:cccccccc` and the principal `user:a:b` with key `cccccccc` would be
+one string, and the collision would be back. It also means no key written before this change can
+ever resolve against one written after it.
+
+### The fingerprint excludes the per-attempt fields
 
 ```ts
 const PER_ATTEMPT_FIELDS = new Set(['correlationId', 'idempotencyKey', 'requestId'])
@@ -218,7 +243,7 @@ src/
   orders.ts         settlement, the auction close, proceeds and payouts
   moderation.ts     freezes and disputes, both reversible
   risk.ts           computed indicators. No score, no grade, no colour — see the header
-  idempotency.ts    the claim, and the fingerprint that excludes per-attempt fields
+  idempotency.ts    the claim, scoped to the caller, and the fingerprint that excludes per-attempt fields
   outbox.ts         the transactional outbox and the signed relay
   jobs.ts           every background timer, as a lease
   ledgerclient.ts   postings, reservations, derived keys, and the failure taxonomy
@@ -233,8 +258,8 @@ scripts/
 
 ## Tests
 
-`node:test` against a real Postgres. **291 `test(`/`it(` declarations, which run as 298 cases,
-zero skipped** (measured 2026-08-01 against `postgres:16-alpine`; a few declarations sit in loops).
+`node:test` against a real Postgres. **347 `test(`/`it(` declarations, which run as 355 cases,
+zero skipped** (measured 2026-08-04 against `postgres:16-alpine`; a few declarations sit in loops).
 
 ```
 MARKET_TEST_DATABASE_URL=postgres://…/market_test pnpm test
@@ -259,6 +284,9 @@ The ones that carry the argument:
 | A captured escrow can never be released afterwards | `orders.test.ts` |
 | The payout happens exactly once under two concurrent workers | `orders.test.ts` |
 | A frozen listing blocks settlement — **through the worker, not only the HTTP route** | `auctions.test.ts`, `moderation.test.ts` |
+| Two callers, one key, identical bodies — **two artefacts**, one each | `callerscoping.test.ts` |
+| A different principal never waits on somebody else's claim | `callerscoping.test.ts` |
+| The same principal still blocks on its own claim, and then replays | `callerscoping.test.ts` |
 | A retry with a fresh correlation id replays rather than 409ing | `idempotency.test.ts` |
 | A concurrent duplicate blocks and then replays — it never double-runs | `idempotency.test.ts` |
 | The same key with a different body is a 409, not a replay | `idempotency.test.ts` |
