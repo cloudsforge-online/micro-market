@@ -122,6 +122,49 @@ test('a 404 degrades rather than denying — a missing route is not a decision',
   assert.equal(v.decision, DEGRADED_VERDICT.decision)
 })
 
+/*
+ * THE THIRD HALF OF THE SAME DEFECT, and the one that actually shut the marketplace in the live
+ * estate on 2026-08-04.
+ *
+ * `market` was started holding the compose PLACEHOLDER token. Policy answered 401. `peerDecided`
+ * was true, so the client called it a `deny`, and `server.ts:678` turned that into a 403 on every
+ * listing by every seller. Found only because somebody tried to seed the marketplace and could
+ * not create a single listing.
+ *
+ * A 401 is a sentence about US, not about the listing: this caller is not authenticated. A 403 is
+ * "this caller may not ask". Neither is a moderator's judgement, and reading them as one makes our
+ * own misconfiguration indistinguishable from a decision — the same shape as a reconciliation
+ * failure that cannot be told apart from "the chain could not be observed".
+ *
+ * 400 is deliberately NOT here: a caller can provoke a malformed request, so failing open on it
+ * would hand an override to anyone able to send bad JSON.
+ */
+for (const status of [401, 403]) {
+  test(`a ${status} is policy refusing US, not policy judging the listing`, async () => {
+    const client = httpPolicyClient({
+      baseUrl: 'http://policy.invalid',
+      token: () => 'token',
+      deadlineMs: 1_000,
+      fetch: async () => new Response('{}', { status, headers: { 'content-type': 'application/json' } }),
+    })
+    const v = await client.evaluateListing(INPUT)
+    assert.equal(v.decision, DEGRADED_VERDICT.decision, `${status} must not read as a moderator's deny`)
+    assert.equal(v.degraded, true, `${status} must be flagged degraded, so the evidence survives`)
+  })
+}
+
+test('a 400 still denies, because a caller can provoke one', async () => {
+  const client = httpPolicyClient({
+    baseUrl: 'http://policy.invalid',
+    token: () => 'token',
+    deadlineMs: 1_000,
+    fetch: async () => new Response('{}', { status: 400, headers: { 'content-type': 'application/json' } }),
+  })
+  const v = await client.evaluateListing(INPUT)
+  assert.equal(v.decision, 'deny', 'failing open on 400 would hand an override to anyone sending bad JSON')
+})
+
+
 test('a decision is never overridden by the fail-open default', async () => {
   const { client } = harness({ status: 400, body: { error: { code: 'bad_request', message: 'no' } } })
   const v = await client.evaluateListing(INPUT)

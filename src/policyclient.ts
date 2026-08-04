@@ -169,7 +169,21 @@ export function httpPolicyClient(options: PolicyClientOptions): PolicyClient {
         // than leaving it unmoderated. Between "shut the market because we misconfigured
         // ourselves" and "list it and flag it", this file's header already chose: fail open, and
         // leave evidence.
-        if (err instanceof HttpError && (err.status === 404 || err.status === 405)) {
+        // 401 and 403 belong here for the same reason, and this is how the marketplace was found
+        // shut a SECOND time: `market` was started holding the compose placeholder token, policy
+        // answered 401, `peerDecided` was true, and every listing by every seller was denied.
+        //
+        // A 401 says THIS CALLER IS NOT AUTHENTICATED. A 403 says this caller may not ask. Neither
+        // is a sentence about the listing — they are sentences about us. Reading them as `deny`
+        // makes our own misconfiguration indistinguishable from a moderator's judgement, which is
+        // the same shape as a reconciliation failure that cannot be told apart from "no chain".
+        //
+        // 400 deliberately still denies: a malformed request is one a caller can provoke, so
+        // failing open on it would hand an override to anyone who could send bad JSON.
+        if (
+          err instanceof HttpError
+          && (err.status === 401 || err.status === 403 || err.status === 404 || err.status === 405)
+        ) {
           return DEGRADED_VERDICT
         }
         if (err instanceof HttpError && err.peerDecided && err.status !== 429) {
