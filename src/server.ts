@@ -254,6 +254,28 @@ export function registerServiceMetrics(metrics: Metrics): Metrics {
       kind: 'counter',
       labels: ['reason'],
     })
+    // ── The three that would have named the seventeen silent hours ─────────────────────────────
+    // See `upstreams.ts`. The credential is deliberately not a hard readiness probe, so these are
+    // what stands in its place: a scrape says whether this process can authenticate at all, and
+    // whether it is on the un-renewable token it will lose in ten minutes.
+    .register({
+      name: 'market_service_token_usable',
+      help: 'Whether this process could authenticate to the ledger, indexer and policy right now. 0 for longer than a scrape means every reservation, escrow and moderation decision is failing.',
+      kind: 'gauge',
+      labels: [],
+    })
+    .register({
+      name: 'market_service_token_static',
+      help: 'Set when this process holds a pre-minted MARKET_SERVICE_TOKEN and no credential. It expires 600 seconds after boot and nothing can renew it, so 1 here is a countdown, not a state.',
+      kind: 'gauge',
+      labels: [],
+    })
+    .register({
+      name: 'market_service_token_events_total',
+      help: 'Service credential exchanges, by kind. `exchange_failed` is identity; `reminted_after_401` above zero is clock skew or a revoked credential.',
+      kind: 'counter',
+      labels: ['kind'],
+    })
 }
 
 const SAFE_REQUEST_ID = /^[A-Za-z0-9_-]{1,64}$/

@@ -28,9 +28,7 @@ import { SERVICE, env } from './env.ts'
 import { SCHEMA_VERSION } from './migrations.ts'
 import { createServer, registerServiceMetrics } from './server.ts'
 import { registerHandlers, rescheduleRecurring, seedRecurring } from './jobs.ts'
-import { httpLedgerClient } from './ledgerclient.ts'
-import { httpIndexerClient } from './indexerclient.ts'
-import { httpPolicyClient } from './policyclient.ts'
+import { buildUpstreams } from './upstreams.ts'
 import type { Db } from './outbox.ts'
 import type { OrderDeps } from './orders.ts'
 import type { BidDeps } from './bids.ts'
@@ -79,24 +77,69 @@ try {
 }
 
 // 5. The upstreams. Constructed before the Lifecycle so its probes can close over their URLs, and
-//    all three take the same scoped service token — never a shared one (SD-05).
-const token = () => env.serviceToken
-const ledger = httpLedgerClient({
-  baseUrl: env.ledgerUrl,
-  token,
-  deadlineMs: env.upstreamDeadlineMs,
+//    all three take the same scoped service credential — never a shared one (SD-05).
+//
+//    ══════════════════════════════════════════════════════════════════════════════════════════
+//    **THE CREDENTIAL IS EXCHANGED, NOT READ ONCE.** The line that used to be here was
+//
+//        const token = () => env.serviceToken
+//
+//    — a function called per request, returning a string read once at import from a token that
+//    expires in 600 seconds. So this service authenticated to the ledger, the indexer and policy
+//    exactly once per bootstrap and presented a dead token for the rest of the process's life. On
+//    the live estate that token had been expired for SEVENTEEN AND A HALF HOURS while the
+//    container served, policy answered 401 to every decision request, and — because
+//    `policyclient.ts` correctly refuses to read a 401 as a verdict — every listing went up with
+//    `degraded: true` and no moderation at all. Nothing was broken enough to notice.
+//
+//    The seam was right and the body was wrong, which is why the body now lives in `upstreams.ts` —
+//    a module a test can import without starting a server, and the only way to write a test that
+//    fails when THIS FILE regresses. That file carries the argument, including why the credential
+//    is deliberately NOT wired to a hard readiness probe here.
+//    ══════════════════════════════════════════════════════════════════════════════════════════
+const upstreams = buildUpstreams(env, {
   originatingService: SERVICE,
+  onEvent: (event) => {
+    metrics.increment('market_service_token_events_total', { kind: event.kind })
+    if (event.kind === 'minted') {
+      // The token itself is never a field here, and must never become one. `service`, `expiresIn`
+      // and the refresh interval are what an operator needs; the bearer is what an attacker needs.
+      logger.info('minted a service token from the credential', {
+        service: event.service,
+        expiresIn: event.expiresIn,
+        refreshInMs: event.refreshInMs,
+      })
+    } else if (event.kind === 'exchange_failed') {
+      // `warn`, not `fatal`, and only because of `hadUsableToken`: a failed exchange while a live
+      // token is still held is the outage this provider is built to ride out, and paging on it
+      // would page on every identity blip.
+      logger.warn('service credential exchange failed', { ...event })
+    }
+  },
 })
-const indexer = httpIndexerClient({
-  baseUrl: env.indexerUrl,
-  token,
-  deadlineMs: env.upstreamDeadlineMs,
-})
-const policy = httpPolicyClient({
-  baseUrl: env.policyUrl,
-  token,
-  deadlineMs: env.upstreamDeadlineMs,
-})
+const { ledger, indexer, policy } = upstreams
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Said at boot, at the level its consequence deserves, because the alternative is what actually
+// happened: a marketplace that looks entirely healthy while its moderation gate is absent.
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+if (upstreams.mode === 'none') {
+  logger.fatal('NO CREDENTIAL AT ALL — every ledger, indexer and policy call will fail', {
+    remedy: 'set MARKET_IDENTITY_CREDENTIAL (long-lived, cfsc_…, from POST /service-credentials)',
+  })
+} else if (upstreams.mode === 'static') {
+  logger.fatal('EXPIRING TOKEN, NOT A CREDENTIAL — every upstream call will 401 about ten minutes from now', {
+    // Said out loud so the failure an operator will hit is one they can search for.
+    whatWillHappen:
+      'MARKET_SERVICE_TOKEN lives 600s and nothing can renew it. From minute ten the ledger refuses ' +
+      'every reservation and escrow, and policy 401s every decision — which policyclient.ts reads as ' +
+      'a degraded gate, so listings keep going up UNMODERATED with no error anywhere.',
+    remedy:
+      'set MARKET_IDENTITY_CREDENTIAL in the deploy; estate-bootstrap.sh already mints it into tokens.env',
+  })
+} else {
+  logger.info('service credential mode', { mode: upstreams.mode, identityUrl: env.identityUrl })
+}
 
 // 6. The Lifecycle and its probes, before the routes, because `/readyz` is a route and it needs
 //    something to report.
@@ -187,6 +230,22 @@ const server = createServer({
     const stats = await queue.stats()
     metrics.set('jobs_pending', stats.pending)
     metrics.set('jobs_overdue', stats.overdue)
+
+    // Read out of the provider's own memory. `static` counts as usable because it is — for about
+    // ten minutes — which is exactly why it needs the second gauge beside it rather than a kinder
+    // reading of the first. Together they answer the question nothing could answer while the
+    // token was dead: can this process authenticate right now, and is it even able to renew?
+    metrics.set(
+      'market_service_token_usable',
+      upstreams.mode === 'exchanged'
+        ? (upstreams.identityTokens?.snapshot().hasUsableToken ?? false)
+          ? 1
+          : 0
+        : upstreams.mode === 'static'
+          ? 1
+          : 0,
+    )
+    metrics.set('market_service_token_static', upstreams.mode === 'static' ? 1 : 0)
   },
 })
 

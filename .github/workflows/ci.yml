@@ -50,7 +50,11 @@ jobs:
         LEDGER_URL=http://127.0.0.1:4007
         INDEXER_URL=http://127.0.0.1:4004
         POLICY_URL=http://127.0.0.1:4011
-        MARKET_SERVICE_TOKEN=ci-only-not-a-real-token-0000000000000
+        # A CREDENTIAL, not a token, because the credential is now the boot path the estate runs
+        # and a smoke test that exercised the retired one would smoke-test the defect. `cfsc_` is
+        # required by `env.ts`, which refuses a token pasted here by name. Nothing dials identity
+        # during the smoke: the provider exchanges lazily, and /livez makes no outbound call.
+        MARKET_IDENTITY_CREDENTIAL=cfsc_ci_only_not_a_real_credential_00000
     secrets:
       # @cloudsforge/* resolves via link:../runtime, so the workflow checks out micro-runtime
       # and micro-contracts as siblings — both private, hence a contents:read token.

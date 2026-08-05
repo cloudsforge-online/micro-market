@@ -23,8 +23,22 @@ const REQUIRED: Record<string, string> = {
   LEDGER_URL: 'http://127.0.0.1:4007',
   INDEXER_URL: 'http://127.0.0.1:4008',
   POLICY_URL: 'http://127.0.0.1:4010',
-  MARKET_SERVICE_TOKEN: 'a-real-looking-token-of-sufficient-length',
 }
+
+/**
+ * **`MARKET_SERVICE_TOKEN` used to be in the block above, and taking it out is the fix, not a
+ * relaxation.**
+ *
+ * It is a token with a hard-coded 600-second life (`identity/src/tokens.ts:33`) that nothing can
+ * renew. Requiring it kept a BOOT DEPENDENCY on the thing being retired: a container given the
+ * long-lived `MARKET_IDENTITY_CREDENTIAL` and no token is correctly configured, and refusing to
+ * start it would be this service insisting on its own defect. The tests below hold the replacement
+ * contract instead — either may be absent, both may be absent, and each is still checked for
+ * placeholder and length when it is present.
+ */
+/** Fabricated. The shape identity issues, none of the entropy — never a value from tokens.env. */
+const CREDENTIAL = 'cfsc_0000000000000000000000000000000000000test'
+const STATIC_TOKEN = 'a-real-looking-token-of-sufficient-length'
 
 for (const [key, value] of Object.entries(REQUIRED)) process.env[key] = value
 
@@ -73,6 +87,72 @@ test('a known placeholder secret is refused outright', () => {
 
 test('a short secret is refused — length is the only entropy proxy available', () => {
   assert.throws(() => loadEnv(withEnv({ MARKET_SERVICE_TOKEN: 'hunter2' })), /at least 24/)
+})
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════
+ * THE CREDENTIAL. See the `identityCredential` docblock in `env.ts` for the seventeen hours.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════ */
+
+test('neither credential nor token is required to BOOT — being loudly wrong beats not running', () => {
+  // This is the change. Requiring `MARKET_SERVICE_TOKEN` kept a boot dependency on a 600-second
+  // token that nothing can renew, so a container configured correctly for the fix would have
+  // refused to start. `upstreams.ts` reports `none` and `index.ts` says so at `fatal`; the absence
+  // is explicit, not silent, which is the property that matters.
+  const env = loadEnv(withEnv())
+  assert.equal(env.identityCredential, null)
+  assert.equal(env.serviceToken, null)
+})
+
+test('the credential is read, and it is the field `upstreams.ts` prefers', () => {
+  const env = loadEnv(withEnv({ MARKET_IDENTITY_CREDENTIAL: CREDENTIAL }))
+  assert.equal(env.identityCredential, CREDENTIAL)
+  assert.equal(env.serviceToken, null)
+})
+
+test('both may be set, which is the state a rolling deploy is actually in', () => {
+  const env = loadEnv(
+    withEnv({ MARKET_IDENTITY_CREDENTIAL: CREDENTIAL, MARKET_SERVICE_TOKEN: STATIC_TOKEN }),
+  )
+  assert.equal(env.identityCredential, CREDENTIAL)
+  assert.equal(env.serviceToken, STATIC_TOKEN)
+})
+
+test('an empty string is an ABSENT credential, not a present one', () => {
+  // `MARKET_IDENTITY_CREDENTIAL: ${MARKET_IDENTITY_CREDENTIAL:-}` in the compose expands to empty
+  // when the variable is unset, so this is the literal value a real deployment passes. Reading it
+  // as present would construct a provider around nothing and throw out of the composition root.
+  assert.equal(loadEnv(withEnv({ MARKET_IDENTITY_CREDENTIAL: '' })).identityCredential, null)
+  assert.equal(loadEnv(withEnv({ MARKET_SERVICE_TOKEN: '   ' })).serviceToken, null)
+})
+
+test('A SERVICE TOKEN PASTED INTO THE CREDENTIAL IS REFUSED BY NAME', () => {
+  // The single most likely mistake while this rolls out: both are opaque strings from identity,
+  // both authenticate, and a token here would work for ten minutes and then reproduce the exact
+  // defect this variable exists to remove. The error names the variable and never quotes it.
+  assert.throws(
+    () => loadEnv(withEnv({ MARKET_IDENTITY_CREDENTIAL: STATIC_TOKEN })),
+    (err: unknown) => {
+      assert.ok(err instanceof EnvError)
+      assert.match(err.message, /MARKET_IDENTITY_CREDENTIAL/)
+      assert.match(err.message, /cfsc_/)
+      assert.ok(!err.message.includes(STATIC_TOKEN), 'the error quoted the secret back')
+      return true
+    },
+  )
+})
+
+test('the credential is held to the placeholder and length rules like any other secret', () => {
+  assert.throws(() => loadEnv(withEnv({ MARKET_IDENTITY_CREDENTIAL: 'changeme' })), EnvError)
+  assert.throws(() => loadEnv(withEnv({ MARKET_IDENTITY_CREDENTIAL: 'cfsc_short' })), /at least 24/)
+})
+
+test('IDENTITY_URL defaults to the issuer, because that is where a token came from', () => {
+  // So a deployment that already names the issuer needs no new URL to get the fix.
+  assert.equal(loadEnv(withEnv()).identityUrl, REQUIRED['IDENTITY_ISSUER'])
+  assert.equal(
+    loadEnv(withEnv({ IDENTITY_URL: 'http://identity:4000' })).identityUrl,
+    'http://identity:4000',
+  )
 })
 
 test('LOG_LEVEL is a closed set', () => {

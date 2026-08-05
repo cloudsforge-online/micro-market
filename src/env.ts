@@ -32,6 +32,11 @@
  */
 
 import { hostname } from 'node:os'
+// The one string that tells a credential from a token by looking at it. Imported rather than
+// spelled here so the two cannot drift: `ServiceTokenProvider` refuses anything without this
+// prefix at construction, and a refusal there reaches the container as a bare V8 stack, whereas a
+// refusal here is the structured fatal line `fatalConfig` below writes.
+import { CREDENTIAL_PREFIX } from '@cloudsforge/auth'
 
 /**
  * The service's own name. A constant rather than a variable: it is a property of the repository,
@@ -78,6 +83,42 @@ function requiredSecret(source: Source, name: string, minLength = 24): string {
   // which a human-chosen string is plausible, so a memorable password fails this check too.
   if (value.length < minLength) {
     throw new EnvError(`${name} must be at least ${minLength} characters (got ${value.length})`)
+  }
+  return value
+}
+
+/**
+ * A secret that may be absent, and is held to every other rule when it is present.
+ *
+ * `null` rather than `undefined`, and rather than `''`: an empty string is falsy in exactly the
+ * places a caller tests for it and truthy in `Object.keys`, so a mode chosen by `env.x ? … : …`
+ * would agree with an operator who set the variable to nothing. `null` is the absence, said once.
+ */
+function optionalSecret(source: Source, name: string): string | null {
+  const value = source[name]?.trim()
+  if (!value) return null
+  return requiredSecret(source, name)
+}
+
+/**
+ * An optional long-lived service credential, checked to be one.
+ *
+ * **The prefix check is the whole reason this is not just `optionalSecret`.** The single most
+ * likely mistake while this fix rolls out is pasting a service TOKEN into the credential variable —
+ * both are opaque strings from identity, both are long, both authenticate. A token here would work
+ * for about ten minutes and then fail in precisely the way this variable exists to prevent, and the
+ * provider's own refusal would arrive as an unstructured throw out of the composition root. Said
+ * here, it is a named variable in a structured fatal line before anything else starts.
+ *
+ * The value itself never appears in the message. A configuration error must not become a leak.
+ */
+function credential(source: Source, name: string): string | null {
+  const value = optionalSecret(source, name)
+  if (value !== null && !value.startsWith(CREDENTIAL_PREFIX)) {
+    throw new EnvError(
+      `${name} must be a long-lived service credential beginning '${CREDENTIAL_PREFIX}' — ` +
+        'this looks like a service token, which expires in 600 seconds and cannot renew itself',
+    )
   }
   return value
 }
@@ -144,8 +185,66 @@ export interface Env {
   readonly indexerNetwork: string
   /** Soft, fail-open-and-flag. See `policyclient.ts` for why a gate that fails closed is worse. */
   readonly policyUrl: string
-  /** The scoped service credential. Not shared: SD-05. */
-  readonly serviceToken: string
+
+  /**
+   * Where a service token is minted. `IDENTITY_ISSUER` unless overridden.
+   *
+   * Defaulted to the issuer rather than made a second required variable, because the issuer of a
+   * token is by definition where the token came from — ledger's and foresight's reasoning, and it
+   * means a deployment that already names the issuer needs no new URL to get the fix.
+   */
+  readonly identityUrl: string
+
+  /**
+   * The long-lived `cfsc_…` credential this service exchanges for a service token.
+   *
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * **THE TEN-MINUTE CLIFF, AND WHAT IT COSTS *THIS* SERVICE.**
+   *
+   * `MARKET_SERVICE_TOKEN` holds a token that lives **600 seconds** (`identity/src/tokens.ts:33`,
+   * `SERVICE_TTL_SECONDS = 10 * 60`; identity will not lengthen it, because rotation IS expiry).
+   * `index.ts` read it once, at import — `const token = () => env.serviceToken` — and handed that
+   * one function to the ledger, the indexer and policy for the life of the process. So this
+   * service authenticated to all three **exactly once per bootstrap**, and every call after minute
+   * ten presented a corpse.
+   *
+   * It was measured, not inferred: the token inside `cloudsforge-estate-market-1` had been expired
+   * for **63,056 seconds** — seventeen and a half hours — while the container served happily, and
+   * policy answered `401 unauthenticated` to market's own bearer presented from inside that
+   * container.
+   *
+   * **And the visible symptom was silence, which is the worst of the three possible ones.**
+   * `policyclient.ts` correctly treats a 401 as policy refusing US rather than as policy judging
+   * the listing, so a seller is no longer told they are banned by our own misconfiguration. What
+   * remains is that every listing on the estate returns `policy: {decision:"review",
+   * reasons:["policy_unavailable"], degraded:true}` — the moderation gate is not degraded, it is
+   * **absent**, on every listing, for ever, and the header of `policyclient.ts` says in as many
+   * words that a silently absent gate is worse than either failing open or failing closed.
+   *
+   * The fix is the estate's, unchanged: `@cloudsforge/auth`'s `ServiceTokenProvider` exchanges this
+   * credential at `POST /service-tokens/exchange`, caches, re-mints at ~80% of `expiresIn` with
+   * per-token jitter, shares one in-flight exchange, and on a 401 discards exactly the rejected
+   * token and replays once. `src/upstreams.ts` carries the argument; this field is the input.
+   *
+   * **Not `requiredSecret`.** `migrator.ts` shares this environment and dials nothing, and a
+   * deployment that has not yet been given the credential must still boot — loudly wrong beats not
+   * running. The absence is not silent: `index.ts` says so at boot at `fatal`, and
+   * `market_service_token_usable` is 0 on every scrape.
+   */
+  readonly identityCredential: string | null
+
+  /**
+   * A pre-minted service token, kept ONLY as the bridge while a deployment still supplies one.
+   *
+   * **This is the defective credential, and it is optional now rather than required.** Requiring it
+   * would keep a boot dependency on the thing being retired: a container that has the credential
+   * and not the token is correctly configured, and refusing to start it would be this file
+   * insisting on the defect. `upstreams.ts` prefers the credential whenever one is present and
+   * ignores this entirely; when it is not, this is presented and the boot log says, at `fatal`,
+   * exactly what will break and when. **Delete this field once no deployment sets it** — it is a
+   * migration aid with a stated end, not a mode.
+   */
+  readonly serviceToken: string | null
   readonly upstreamDeadlineMs: number
 
   /**
@@ -215,7 +314,10 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     // have to remember two spellings of one fact.
     indexerNetwork: optional(source, 'INDEXER_NETWORK', 'mainnet'),
     policyUrl: required(source, 'POLICY_URL'),
-    serviceToken: requiredSecret(source, 'MARKET_SERVICE_TOKEN'),
+
+    identityUrl: optional(source, 'IDENTITY_URL', required(source, 'IDENTITY_ISSUER')),
+    identityCredential: credential(source, 'MARKET_IDENTITY_CREDENTIAL'),
+    serviceToken: optionalSecret(source, 'MARKET_SERVICE_TOKEN'),
     upstreamDeadlineMs: integer(source, 'MARKET_UPSTREAM_DEADLINE_MS', 5_000, 100, 60_000),
 
     platformFeeBps,
