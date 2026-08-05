@@ -32,11 +32,16 @@
  */
 
 import { hostname } from 'node:os'
-// The one string that tells a credential from a token by looking at it. Imported rather than
-// spelled here so the two cannot drift: `ServiceTokenProvider` refuses anything without this
-// prefix at construction, and a refusal there reaches the container as a bare V8 stack, whereas a
-// refusal here is the structured fatal line `fatalConfig` below writes.
-import { CREDENTIAL_PREFIX } from '@cloudsforge/auth'
+// `CREDENTIAL_PREFIX` from `@cloudsforge/auth` used to be imported here, to tell a credential from
+// a token by looking at it. It is gone because `assertServiceCredential` below asks the same
+// question and four more: the prefix, the base64url alphabet, 32 decoded BYTES, an entropy floor,
+// and a JWT refused BY NAME. One import rather than two, and the prefix is still the first thing it
+// checks — see `@cloudsforge/secrets`' `SERVICE_CREDENTIAL` regex.
+import {
+  SecretError,
+  assertGeneratedSecret,
+  assertServiceCredential,
+} from '@cloudsforge/secrets'
 
 /**
  * The service's own name. A constant rather than a variable: it is a property of the repository,
@@ -53,18 +58,20 @@ export class EnvError extends Error {
   }
 }
 
-const PLACEHOLDERS = new Set([
-  'changeme',
-  'change-me',
-  'change_me',
-  'placeholder',
-  'secret',
-  'token',
-  'dev-secret',
-  'dev-outbox-signing-secret',
-  'replace-with-a-real-secret',
-  'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-])
+/**
+ * THE `PLACEHOLDERS` SET THAT USED TO BE HERE IS GONE, AND ITS ABSENCE IS THE FIX.
+ *
+ * It held ten exact strings and was paired with a 24-character floor. Neither could fail for the
+ * value that actually reached 44 containers on both networks: micro-org #142's
+ * `estate-only-outbox-secret-00000000000000` is 40 characters and was on nobody's list. A check
+ * that cannot fail is worse than no check, because the absence of an alarm gets read as the
+ * absence of a problem — and this service settles sales.
+ *
+ * A deny-list of exact strings is structurally unable to work: the next placeholder somebody
+ * writes is, by definition, not on it. `@cloudsforge/secrets` asserts the SHAPE of a generated
+ * value instead, which is the property a placeholder cannot have. It is imported rather than
+ * copied so that this service cannot drift from the other sixteen.
+ */
 
 type Source = Readonly<Record<string, string | undefined>>
 
@@ -74,52 +81,74 @@ function required(source: Source, name: string): string {
   return value
 }
 
-function requiredSecret(source: Source, name: string, minLength = 24): string {
+/**
+ * Re-wrap the shared guard's `SecretError` as this service's `EnvError`.
+ *
+ * `loadEnv` documents a single error class for every configuration failure, and the boot path
+ * catches that one class. The message is preserved verbatim — it already names the variable and
+ * the command that fixes it, and it never contains the value.
+ */
+function asEnvError<T>(run: () => T): T {
+  try {
+    return run()
+  } catch (err) {
+    if (err instanceof SecretError) throw new EnvError(err.message)
+    throw err
+  }
+}
+
+/**
+ * The estate's shared event-bus HMAC key — and on THIS service it is also the inbound verifier.
+ *
+ * Market consumes `billing.entitlement.revoked` and `identity.user.deleted` on the same route it
+ * signs its own events with, so a weak value here is a free-delisting endpoint: anyone who can
+ * reach the port asserts that a seller's entitlement was revoked and their listings come down.
+ *
+ * `assertGeneratedSecret` asserts what a placeholder cannot have: the base64 or hex alphabet (no
+ * hyphens — every placeholder this estate wrote had one), 32 decoded BYTES rather than 24
+ * keystrokes, and a measured Shannon entropy floor. The old `minLength` parameter is gone rather
+ * than kept in front: it is a strict subset of the shape check, and running it first answers a
+ * 40-character placeholder with "must be at least 24 characters" — true, useless, and about the
+ * wrong property.
+ */
+function requiredSigningSecret(source: Source, name: string): string {
   const value = required(source, name)
-  if (PLACEHOLDERS.has(value.toLowerCase())) {
-    throw new EnvError(`${name} is set to a known placeholder — generate a real secret`)
-  }
-  // Length is a proxy for entropy and the only one available here. It is set above the point at
-  // which a human-chosen string is plausible, so a memorable password fails this check too.
-  if (value.length < minLength) {
-    throw new EnvError(`${name} must be at least ${minLength} characters (got ${value.length})`)
-  }
+  asEnvError(() => assertGeneratedSecret(name, value))
   return value
 }
 
 /**
- * A secret that may be absent, and is held to every other rule when it is present.
+ * A SERVICE CREDENTIAL that may be absent, but must be real if present.
+ *
+ * ── ABSENCE IS A SUPPORTED MODE, AND IT STAYS ONE ──────────────────────────────────────────────
  *
  * `null` rather than `undefined`, and rather than `''`: an empty string is falsy in exactly the
  * places a caller tests for it and truthy in `Object.keys`, so a mode chosen by `env.x ? … : …`
  * would agree with an operator who set the variable to nothing. `null` is the absence, said once.
+ *
+ * The empty check stays AHEAD of the assertion, because compose interpolates
+ * `${MARKET_IDENTITY_CREDENTIAL:-}` and an unset credential arrives as the EMPTY STRING. That is
+ * the supported mode, not a malformed one, and `migrator.ts` shares this environment while dialling
+ * nobody. Turning it into `exit(1)` would fail `market-migrate`, which eleven other services wait
+ * on through `service_completed_successfully`.
+ *
+ * What is not supported is a value that is present and rubbish: a 20-character placeholder is a
+ * deployment that believes it HAS a credential, and it fails on its first call to policy with a 401
+ * that `policyclient.ts` correctly records as a DEGRADED verdict — which is the silent unmoderated
+ * marketplace this whole file's history is about.
+ *
+ * ── WHY NOT `assertGeneratedSecret` ────────────────────────────────────────────────────────────
+ *
+ * Because it would refuse every credential this estate has ever minted, and market would exit 1 at
+ * boot on BOTH networks. A credential is `cfsc_` + base64url, which is neither wholly base64 nor
+ * wholly hex — the underscore in its own prefix disqualifies it. Measured live: the testnet
+ * credential also CONTAINS A HYPHEN while the mainnet one does not, so the "no hyphens" instinct
+ * that is correct for the signing key above would have booted mainnet and killed testnet.
  */
-function optionalSecret(source: Source, name: string): string | null {
+function optionalCredential(source: Source, name: string): string | null {
   const value = source[name]?.trim()
   if (!value) return null
-  return requiredSecret(source, name)
-}
-
-/**
- * An optional long-lived service credential, checked to be one.
- *
- * **The prefix check is the whole reason this is not just `optionalSecret`.** The single most
- * likely mistake while this fix rolls out is pasting a service TOKEN into the credential variable —
- * both are opaque strings from identity, both are long, both authenticate. A token here would work
- * for about ten minutes and then fail in precisely the way this variable exists to prevent, and the
- * provider's own refusal would arrive as an unstructured throw out of the composition root. Said
- * here, it is a named variable in a structured fatal line before anything else starts.
- *
- * The value itself never appears in the message. A configuration error must not become a leak.
- */
-function credential(source: Source, name: string): string | null {
-  const value = optionalSecret(source, name)
-  if (value !== null && !value.startsWith(CREDENTIAL_PREFIX)) {
-    throw new EnvError(
-      `${name} must be a long-lived service credential beginning '${CREDENTIAL_PREFIX}' — ` +
-        'this looks like a service token, which expires in 600 seconds and cannot renew itself',
-    )
-  }
+  asEnvError(() => assertServiceCredential(name, value))
   return value
 }
 
@@ -256,9 +285,9 @@ export interface Env {
    * per-token jitter, shares one in-flight exchange, and on a 401 discards exactly the rejected
    * token and replays once. `src/upstreams.ts` carries the argument; this field is the input.
    *
-   * **Not `requiredSecret`.** `migrator.ts` shares this environment and dials nothing, and a
-   * deployment that has not yet been given the credential must still boot — loudly wrong beats not
-   * running. The absence is not silent: `index.ts` says so at boot at `fatal`, and
+   * **NOT REQUIRED, and the guard on it is `assertServiceCredential`.** `migrator.ts` shares this
+   * environment and dials nothing, and a deployment that has not yet been given the credential must
+   * still boot — loudly wrong beats not running. The absence is not silent: `index.ts` says so at boot at `fatal`, and
    * `market_service_token_usable` is 0 on every scrape.
    */
   readonly identityCredential: string | null
@@ -273,6 +302,32 @@ export interface Env {
    * ignores this entirely; when it is not, this is presented and the boot log says, at `fatal`,
    * exactly what will break and when. **Delete this field once no deployment sets it** — it is a
    * migration aid with a stated end, not a mode.
+   *
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * **IT IS GUARDED BY `assertServiceCredential`, WHICH REFUSES A JWT BY NAME — micro-org #222.**
+   *
+   * Measured live on 2026-08-05: the value in this variable on the running estate is a **697-byte
+   * JWT that expired 26 hours before it was read**, on a container reporting healthy. The compose
+   * default when nothing is exported is `estate-placeholder-token-0000000000000000`, which is
+   * micro-org #142 wearing a different name. Both are refused, and both refusals are correct.
+   *
+   * **No JWT exemption is added and no weaker assertion is substituted**, because either would be
+   * this file agreeing that a ten-minute bearer read once at boot is an acceptable standing
+   * credential. It is not: that is the entire defect, and a guard with a hole shaped exactly like
+   * the defect is a guard that has been deleted with extra steps.
+   *
+   * The consequence, stated so nobody discovers it during a deploy: **a deployment that still sets
+   * `MARKET_SERVICE_TOKEN` to a token will not boot** — neither `market` nor `market-migrate`, and
+   * the migrator takes eleven services with it through `service_completed_successfully`. The remedy
+   * is the one the compose file has been describing for a release: stop passing the token, pass
+   * `MARKET_IDENTITY_CREDENTIAL`, which `estate-bootstrap.sh` has minted all along.
+   *
+   * The remaining sharp edge is worth naming rather than hiding: a `cfsc_…` value pasted HERE now
+   * passes this guard and is then presented verbatim as a Bearer by `upstreams.ts`, which 401s
+   * every upstream. The assertion narrows the accepted set to values that cannot work in this slot,
+   * which is the retirement #222 asks for done without deleting the field — and the field should be
+   * deleted, with `CredentialMode`'s `static` arm, in the follow-up that wallet has already made.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
    */
   readonly serviceToken: string | null
   readonly upstreamDeadlineMs: number
@@ -335,7 +390,7 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     databasePoolMax: integer(source, 'MARKET_DATABASE_POOL_MAX', 10, 1, 100),
     identityJwksUrl: required(source, 'IDENTITY_JWKS_URL'),
     identityIssuer: required(source, 'IDENTITY_ISSUER'),
-    outboxSigningSecret: requiredSecret(source, 'OUTBOX_SIGNING_SECRET'),
+    outboxSigningSecret: requiredSigningSecret(source, 'OUTBOX_SIGNING_SECRET'),
     instanceId: optional(source, 'INSTANCE_ID', host || 'unknown'),
 
     ledgerUrl: required(source, 'LEDGER_URL'),
@@ -350,8 +405,11 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     studioPublicUrl: optional(source, 'STUDIO_PUBLIC_URL', '').replace(/\/+$/, ''),
 
     identityUrl: optional(source, 'IDENTITY_URL', required(source, 'IDENTITY_ISSUER')),
-    identityCredential: credential(source, 'MARKET_IDENTITY_CREDENTIAL'),
-    serviceToken: optionalSecret(source, 'MARKET_SERVICE_TOKEN'),
+    identityCredential: optionalCredential(source, 'MARKET_IDENTITY_CREDENTIAL'),
+    // The SAME assertion as the credential above, deliberately. See the field docblock: this
+    // variable holds a JWT on the live estate and a JWT is what `assertServiceCredential` refuses
+    // by name. Pointing it at a weaker check would keep #222 open in the one file that can close it.
+    serviceToken: optionalCredential(source, 'MARKET_SERVICE_TOKEN'),
     upstreamDeadlineMs: integer(source, 'MARKET_UPSTREAM_DEADLINE_MS', 5_000, 100, 60_000),
 
     platformFeeBps,

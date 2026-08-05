@@ -1,6 +1,6 @@
 {
   "name": "@cloudsforge/market",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Forge Market. Listings whose existence requires a ledger reservation, dual-mode settlement per AD-14, orders that cannot exist without a settlement artefact, auctions, offers, computed risk indicators, moderation and reversible disputes.",
   "license": "MIT",
@@ -38,6 +38,7 @@
     "@cloudsforge/http": "link:../runtime/packages/http",
     "@cloudsforge/jobs": "link:../runtime/packages/jobs",
     "@cloudsforge/lifecycle": "link:../runtime/packages/lifecycle",
+    "@cloudsforge/secrets": "link:../runtime/packages/secrets",
     "@cloudsforge/telemetry": "link:../runtime/packages/telemetry",
     "postgres": "^3.4.5",
     "tsx": "^4.19.2"
