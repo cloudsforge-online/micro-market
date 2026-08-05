@@ -882,6 +882,96 @@ export const MIGRATIONS: readonly Migration[] = [
         where idempotency_key is not null;
     `,
   },
+  {
+    version: 13,
+    name: 'listing_images',
+    up: `
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+      -- A LISTING'S GALLERY. A REFERENCE INTO micro-studio, AND NOTHING ELSE.
+      --
+      -- There is no bytes column here, no path, no bucket key and no upload directory anywhere in
+      -- this service — deliberately, and the same way 'escrows.amount' is a reference to a ledger
+      -- reservation rather than a balance (see this file's header). micro-studio is the estate's
+      -- one media service: it validates magic bytes, refuses SVG, bounds dimensions, strips EXIF
+      -- and GPS, and serves with 'nosniff' plus a restrictive CSP (studio/src/server.ts). A second
+      -- copy of that decision-making living here would be a second thing to secure, back up and
+      -- cache, and the day the two disagreed the weaker one would be the one an attacker used.
+      --
+      -- 'studio_asset_id' is therefore NOT a foreign key. It cannot be: studio owns a different
+      -- database, and a constraint across a service boundary is a coupling that turns one
+      -- service's migration into another service's outage. The consequence is stated rather than
+      -- hidden — a row here can name an asset studio has never heard of, and the symptom of that
+      -- is a broken image, not a broken invariant. Nothing about money, ownership or settlement
+      -- reads this table.
+      --
+      -- ── THE GALLERY SIZE IS BOUNDED BY THE SCHEMA, NOT BY A HANDLER ────────────────────────
+      --
+      -- 'position' is bounded to 0 <= position < 10 and 'listing_images_position_uniq' makes
+      -- (listing_id, position) unique. Together those two CHECKs cap a listing at ten images
+      -- without a trigger, without a counter column and without a 'select count(*)' in a route:
+      -- ten distinct values, each usable once, so an eleventh row has nowhere to go and the INSERT
+      -- fails. The rejected alternative was 'select count(*) < 10' inside the attach handler,
+      -- which is a check with a race in it — two concurrent attaches both read nine — and which is
+      -- also invisible to anything that writes to this table by any other route, including a
+      -- backfill somebody runs by hand at 03:00.
+      --
+      -- Ten rather than eight or twelve is a judgement, not a derivation: enough for a seller to
+      -- show an item from every angle, few enough that a listing page is not a download. Raising
+      -- it later is a migration that widens the range check, which is exactly the review this
+      -- number should get.
+      --
+      -- ── ONE VOCABULARY FOR A CONTENT ADDRESS ───────────────────────────────────────────────
+      --
+      -- 'sha256:<64 lowercase hex>' is spelled here character for character as studio spells it
+      -- (studio/src/assets.ts) and as tessera does (tessera/src/migrations.ts:603, constraint
+      -- 'objects_checksum_shape'). The estate has one vocabulary for a content address, not two
+      -- dialects that have to be translated at every boundary — and a shape check here is what
+      -- stops a client sending a bare hex digest, or an uppercase one, which would compare unequal
+      -- to studio's own row for the same bytes for ever.
+      --
+      -- IT IS A RECORDED CONTENT ADDRESS AND NOT AN ATTESTATION. This service does not fetch the
+      -- asset and does not verify that the digest is the digest of those bytes; studio computed it
+      -- and this row remembers what the client said studio said. There is no chain attestation
+      -- behind it either: Hearth has NO Registry of Authorship contract — tessera/src/kiln.ts:373
+      -- records that the Solidity has never been written, and mint's catalogue can only deploy
+      -- three ERC-20 variants — so studio's own 'anchor.state' is 'unanchored' on every asset that
+      -- exists. Nothing in this service may render this column as "verified", "attested",
+      -- "on-chain" or "anchored". That would be a check that always passes, presented to people
+      -- who are about to spend money they cannot get back, which is worse than saying nothing.
+      --
+      -- (That sentence avoids one very ordinary English adjective on purpose, and this one avoids
+      -- it too. CI greps this file for money columns with an UNANCHORED pattern that includes the
+      -- name of Postgres's four-letter single-precision type, which is also an everyday English
+      -- word — so the phrase this comment wanted would have failed the build from inside a
+      -- comment. Written down rather than silently worked around, because the next person to write
+      -- that phrase deserves to know why it vanished. market-web's own CI hit the same trap and
+      -- fixed it properly, by stripping comments before grepping: "a guard that fails on correct
+      -- code is a guard somebody deletes".)
+      --
+      -- The primary key is (listing_id, studio_asset_id): one asset appears at most once in one
+      -- listing's gallery, so a double-clicked Attach is a conflict rather than the same
+      -- photograph twice. There is no surrogate id, because there is no fact about one of these
+      -- rows that is not already in its natural key.
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+      create table if not exists listing_images (
+        listing_id      uuid        not null references listings (id) on delete cascade,
+        studio_asset_id uuid        not null,
+        checksum        text        not null,
+        position        integer     not null,
+        attached_at     timestamptz not null default now(),
+
+        primary key (listing_id, studio_asset_id),
+
+        constraint listing_images_checksum_shape check (checksum ~ '^sha256:[0-9a-f]{64}$'),
+        constraint listing_images_position_range check (position >= 0 and position < 10),
+        constraint listing_images_position_uniq unique (listing_id, position)
+      );
+
+      -- No further index. 'listing_images_position_uniq' is backed by a unique index on
+      -- (listing_id, position), which is exactly the read path — every image of one listing, in
+      -- gallery order — so a second index on the same columns would be write cost for nothing.
+    `,
+  },
 ]
 
 /**
@@ -914,6 +1004,7 @@ export const TABLES: readonly string[] = Object.freeze([
   'offers',
   'bids',
   'escrows',
+  'listing_images',
   'listing_royalties',
   'listings',
   'verifications',

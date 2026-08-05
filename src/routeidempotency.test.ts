@@ -34,7 +34,11 @@ const EXEMPT: Readonly<Record<string, string>> = {
   'POST /v1/listings/:id/activate':
     'a state transition claimed with `where status = ...`; the second attempt matches no row',
   'DELETE /v1/listings/:id': 'DELETE is idempotent by definition',
+  'DELETE /v1/listings/:id/images/:assetId':
+    'DELETE is idempotent by definition — and `detachListingImage` answers 200 with `detached: false` for an image that was already gone, so a retry reports success rather than a 404 for work that succeeded',
   'DELETE /v1/offers/:id': 'DELETE is idempotent by definition',
+  'PUT /v1/listings/:id/images':
+    'a PUT of the COMPLETE gallery: the same ordering sent twice leaves the same gallery, and `setListingGallery` emits nothing when the resulting order is unchanged, so a retry is not even an event',
   'POST /v1/disputes/:id/resolve': 'a state transition claimed on the dispute\'s current state',
   'POST /v1/moderation/cases/:id/resolve': 'a state transition claimed on the case\'s current state',
 }

@@ -43,6 +43,7 @@ import {
   type TopicSpec,
 } from '@cloudsforge/contracts-events'
 import { BID_PLACED_TOPIC, OFFER_MADE_TOPIC } from './bids.ts'
+import { IMAGES_CHANGED_TOPIC } from './listingimages.ts'
 import { LISTED_TOPIC, REMOVED_TOPIC, SOLD_TOPIC } from './listings.ts'
 import {
   CASE_OPENED_TOPIC,
@@ -68,6 +69,7 @@ export const EMITTED_TOPICS = Object.freeze([
   LISTED_TOPIC,
   SOLD_TOPIC,
   REMOVED_TOPIC,
+  IMAGES_CHANGED_TOPIC,
   CASE_OPENED_TOPIC,
   CASE_RESOLVED_TOPIC,
   DISPUTE_OPENED_TOPIC,
@@ -149,6 +151,20 @@ export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Ob
       keyedBy: 'listing_id',
       description:
         'An active listing ended without a sale. Its item escrow was released, and so was every open bid and offer — each of whose subjects is named.',
+    },
+  },
+  'market.listing_image.changed': {
+    reason:
+      "A listing's photographs changed. Two consumers already need it and neither can hear it today: a search or browse projection caches the gallery and would serve a detached image for ever, and any CDN in front of micro-studio needs to know a listing stopped pointing at an asset. The payload carries the gallery AS IT NOW STANDS rather than a diff, so a consumer that missed an earlier delivery is corrected by the next one instead of drifting. It names studio asset ids and content addresses and NO URL — where a browser reaches studio is a deployment fact this service reads from its environment, and an event that carried one would freeze today's hostname into a row that outlives it.",
+    spec: {
+      producer: 'market',
+      payloadType: 'ListingImagesChanged',
+      version: '1.0',
+      // `listingimages.ts` emits it keyed by the listing, like every other topic here: ordering is
+      // per (topic, key), and an attach followed by a reorder must arrive in that order.
+      keyedBy: 'listing_id',
+      description:
+        "A listing's image gallery was changed by its seller — an image attached, detached, or the order set. Carries the resulting gallery in position order as studio asset ids with their content addresses. The addresses are RECORDED, not verified and not anchored: no consumer may render them as proof of anything.",
     },
   },
   'market.moderation.opened': {

@@ -216,6 +216,10 @@ const server = createServer({
   indexer,
   indexerNetwork: env.indexerNetwork,
   policy,
+  // Where a BROWSER reaches studio, which is not where a service does. `env.ts` says why the two
+  // are different variables; empty means images are unconfigured here and every `bytesUrl` this
+  // process emits is null rather than a guess.
+  studioPublicUrl: env.studioPublicUrl,
   queue,
   // The same secret signs what this service emits and verifies what billing and identity send.
   // See the header of `server.ts`: an unsigned inbound event route is a free-delisting endpoint.

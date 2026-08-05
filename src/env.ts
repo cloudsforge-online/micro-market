@@ -187,6 +187,36 @@ export interface Env {
   readonly policyUrl: string
 
   /**
+   * Where a **BROWSER** reaches micro-studio. Not where this service reaches it.
+   *
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * This service makes no call to studio at all — a listing image is a reference this service
+   * records and studio serves (`listingimages.ts` says why at length). So the only thing this
+   * variable is used for is composing the `bytesUrl` a listing read hands to a client, and the
+   * upload address that client is told to POST its bytes to.
+   *
+   * **It is therefore NOT `STUDIO_URL`, and the difference is the whole point.** The estate's
+   * compose file already sets `STUDIO_URL: http://studio:4000` for the services that call studio
+   * server-to-server. That address is a container name on a private network: putting it in an
+   * `<img src>` produces a broken image on every device in the world. The value here is the public
+   * one, and naming it differently is what stops the two being conflated by whoever writes the
+   * next deployment.
+   *
+   * **Empty is a supported state and it means "this deployment has not been told".** In that case
+   * a listing read reports `bytesUrl: null` and `uploadUrl: null` rather than guessing a hostname:
+   * a guessed URL is a broken image and a failed upload with no diagnosis, while an explicit null
+   * is a client that can say "images are not configured here" out loud. It is not `required()`
+   * because a service that refuses to boot until an unrelated deployment file is edited takes the
+   * marketplace down to add a feature to it.
+   *
+   * NOTE FOR WHOEVER SETS IT: micro-studio has no router in `deploy/gateway/dynamic/` and no
+   * `studio` entry in the surface registry today, so there is no public hostname to put here yet.
+   * Until there is, images stay unconfigured and every surface says so.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  readonly studioPublicUrl: string
+
+  /**
    * Where a service token is minted. `IDENTITY_ISSUER` unless overridden.
    *
    * Defaulted to the issuer rather than made a second required variable, because the issuer of a
@@ -314,6 +344,10 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     // have to remember two spellings of one fact.
     indexerNetwork: optional(source, 'INDEXER_NETWORK', 'mainnet'),
     policyUrl: required(source, 'POLICY_URL'),
+    // Trailing slashes are stripped so `${base}/v1/assets/…` cannot become `//v1/assets/…`, which
+    // some proxies treat as a protocol-relative URL and others as a path. One normalisation here
+    // rather than a defensive join at each of the two call sites.
+    studioPublicUrl: optional(source, 'STUDIO_PUBLIC_URL', '').replace(/\/+$/, ''),
 
     identityUrl: optional(source, 'IDENTITY_URL', required(source, 'IDENTITY_ISSUER')),
     identityCredential: credential(source, 'MARKET_IDENTITY_CREDENTIAL'),

@@ -44,6 +44,7 @@ import type { OrderDeps } from './orders.ts'
 import type { BidDeps } from './bids.ts'
 import type { ModerationDeps } from './moderation.ts'
 import type { ActivateDeps, EndListingDeps } from './listings.ts'
+import type { ListingImageDeps } from './listingimages.ts'
 
 export const ALICE = '11111111-1111-4111-8111-111111111111'
 export const BOB = '22222222-2222-4222-8222-222222222222'
@@ -294,6 +295,8 @@ export interface Harness {
   readonly bids: BidDeps
   readonly moderation: ModerationDeps
   readonly listings: ActivateDeps & EndListingDeps
+  /** No ledger: a gallery change moves no money and reserves nothing. See `listingimages.ts`. */
+  readonly images: ListingImageDeps
 }
 
 export interface HarnessOptions {
@@ -334,6 +337,7 @@ export function harness(sql: postgres.Sql, options: HarnessOptions = {}): Harnes
     },
     moderation: { sql: db, ledger, producer },
     listings: { sql: db, ledger, producer },
+    images: { sql: db, producer },
   }
 }
 

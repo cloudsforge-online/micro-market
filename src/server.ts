@@ -106,6 +106,16 @@ import {
   type VerificationLevel,
 } from './listings.ts'
 import {
+  MAX_LISTING_IMAGES,
+  attachListingImage,
+  detachListingImage,
+  listingImages,
+  listingImagesFor,
+  setListingGallery,
+  type GalleryEntry,
+  type ListingImage,
+} from './listingimages.ts'
+import {
   AuctionClosedError,
   BidError,
   BidTooLowError,
@@ -167,6 +177,15 @@ export interface ServerDeps {
   readonly sql: Db
   readonly producer: string
   readonly listings: ActivateDeps & EndListingDeps
+  /**
+   * Where a BROWSER reaches micro-studio — `STUDIO_PUBLIC_URL`, and see `env.ts` for why that is
+   * not the same variable as the one server-to-server callers use.
+   *
+   * Absent or empty means this deployment has not been told, and every `bytesUrl` this server
+   * emits is then `null`. That is deliberate: a guessed hostname is a broken `<img>` with no
+   * explanation, whereas an explicit null is something a client can render a sentence about.
+   */
+  readonly studioPublicUrl?: string
   readonly orders: OrderDeps
   readonly bids: BidDeps
   readonly moderation: ModerationDeps
@@ -199,6 +218,12 @@ export function registerServiceMetrics(metrics: Metrics): Metrics {
       help: 'Listings created, by asset kind and settlement mode.',
       kind: 'counter',
       labels: ['asset_kind', 'settlement_mode'],
+    })
+    .register({
+      name: 'market_listing_images_total',
+      help: 'Gallery changes, by kind. A `detached` that climbs far above `attached` is sellers finding their images are not rendering, which is what an unset STUDIO_PUBLIC_URL looks like from the outside.',
+      kind: 'counter',
+      labels: ['change'],
     })
     .register({
       name: 'market_orders_total',
@@ -674,7 +699,23 @@ function buildRoutes(): Route[] {
           ? { collectionId: ctx.url.searchParams.get('collectionId') as string }
           : {}),
       })
-      return { status: 200, body: { listings: listings.map(listingWire) } }
+      // ONE query for the whole page's galleries, not one per listing. Fifty listings would
+      // otherwise be fifty-one round trips on the busiest read this service serves.
+      const galleries = await listingImagesFor(
+        deps.sql,
+        listings.map((listing) => listing.id),
+      )
+      return {
+        status: 200,
+        body: {
+          listings: listings.map((listing) => ({
+            ...listingWire(listing),
+            images: (galleries.get(listing.id) ?? []).map((image) =>
+              imageWire(image, deps.studioPublicUrl),
+            ),
+          })),
+        },
+      }
     }),
 
     define('GET', '/v1/listings/:id', async (ctx, deps) => {
@@ -688,6 +729,13 @@ function buildRoutes(): Route[] {
             subject: share.subject,
             bps: share.bps,
           })),
+          // On the LISTING read rather than behind a route of its own. A listing page that had to
+          // make a second request for its photographs would render text first and pictures a round
+          // trip later, and a client that forgot the second call would show a marketplace with no
+          // images at all and no error to explain it.
+          images: (await listingImages(deps.sql, listing.id)).map((image) =>
+            imageWire(image, deps.studioPublicUrl),
+          ),
         },
       }
     }),
@@ -894,6 +942,147 @@ function buildRoutes(): Route[] {
           status: 200,
           body: { verification, indicators: [], indicatorsAvailable: false },
         }
+      }
+    }),
+
+    /* ------------------------------------------------------------------ listing images */
+
+    /**
+     * Where a browser sends an image, and what this service will accept a reference to.
+     *
+     * ── WHY A CLIENT HAS TO BE TOLD, RATHER THAN KNOWING ──────────────────────────────────────
+     *
+     * Bytes go to micro-studio and never through here (`listingimages.ts` says why). A browser
+     * therefore needs studio's public address — and it has no way to derive one:
+     * `ui/packages/ui/src/surfaces.ts` has no `studio` key, so `cloudsforgeHosts()` cannot compose
+     * an address for it, and inventing `studio.<apex>` in a frontend would be a hostname the estate
+     * promises and does not serve. The one process that knows is this one, which reads it from its
+     * own environment at runtime, so this is where the answer comes from.
+     *
+     * Unauthenticated, because it is configuration and not data: it discloses the hostname a client
+     * is about to be sent to and a constant from this service's own source. Requiring a token would
+     * mean the sell page could not tell a signed-out visitor whether images work here.
+     *
+     * `uploadUrl: null` is the honest answer when `STUDIO_PUBLIC_URL` is unset, and a client is
+     * expected to render "images are not available on this deployment" rather than a control that
+     * cannot work.
+     */
+    define('GET', '/v1/images/config', async (_ctx, deps) => {
+      const base = deps.studioPublicUrl ?? ''
+      return {
+        status: 200,
+        body: {
+          // `?visibility=public` is NOT appended here. It is a choice about the asset, made by the
+          // caller at upload time (`studio/src/server.ts`, the `/v1/uploads` route), and a base URL
+          // that had it baked in would be a base URL that could only ever publish.
+          uploadUrl: base === '' ? null : `${base}/v1/uploads`,
+          maxImagesPerListing: MAX_LISTING_IMAGES,
+          /**
+           * What the file picker should offer. **A convenience, and explicitly not a control.**
+           * studio decides on magic bytes and refuses SVG outright; an `accept` attribute is a
+           * filter a user can defeat with the "all files" option in every operating system's
+           * dialog. It is here so the common case is pleasant, not so the uncommon one is safe.
+           */
+          acceptedMediaTypes: ['image/png', 'image/jpeg', 'image/webp'],
+        },
+      }
+    }),
+
+    /**
+     * Attach one studio asset to a listing's gallery.
+     *
+     * Wrapped in `withIdempotentRoute` like every other route that creates an artefact: a
+     * double-tapped Add on a phone is two POSTs for one intent, and the natural key underneath —
+     * `listing_images`'s primary key `(listing_id, studio_asset_id)` — is what makes the replay
+     * safe even when the claim row is rolled back. Compare `listings_idempotency_uniq`, added for
+     * exactly this reason in migration 12.
+     */
+    define('POST', '/v1/listings/:id/images', async (ctx, deps) => {
+      const principal = await authenticate(ctx, deps)
+      if (principal.kind === 'service') requireScope(principal, WRITE_SCOPE)
+      const listingId = itemIdOf(ctx)
+      const body = await readJson(ctx.req)
+      await requireSeller(deps, listingId, principal)
+
+      return withIdempotentRoute(ctx, deps, principal, '/v1/listings/:id/images', { listingId, ...body }, async () => {
+        const result = await attachListingImage(imageDeps(deps), {
+          listingId,
+          sellerSubject: subjectOf(principal),
+          studioAssetId: requireString(body, 'studioAssetId'),
+          checksum: requireString(body, 'checksum'),
+          actor: actorOf(principal),
+          correlationId: ctx.requestId,
+        })
+        deps.metrics.increment('market_listing_images_total', { change: 'attached' })
+        return {
+          response: {
+            image: imageWire(result.image, deps.studioPublicUrl),
+            images: result.images.map((image) => imageWire(image, deps.studioPublicUrl)),
+          },
+          // The gallery has no surrogate id — its primary key is (listing, asset) — so the artefact
+          // this request produced is named by the listing it belongs to.
+          artefactId: listingId,
+        }
+      })
+    }),
+
+    /**
+     * Remove one studio asset from a listing's gallery.
+     *
+     * The asset is NOT deleted: studio owns it, the user may have it on another listing, and a
+     * marketplace that destroyed somebody's photograph because they reordered a listing would be
+     * destroying the only copy. This unsays a reference and nothing else.
+     */
+    define('DELETE', '/v1/listings/:id/images/:assetId', async (ctx, deps) => {
+      const principal = await authenticate(ctx, deps)
+      if (principal.kind === 'service') requireScope(principal, WRITE_SCOPE)
+      const listingId = itemIdOf(ctx)
+      await requireSeller(deps, listingId, principal)
+
+      const result = await detachListingImage(imageDeps(deps), {
+        listingId,
+        sellerSubject: subjectOf(principal),
+        studioAssetId: uuidParam(ctx, 'assetId'),
+        actor: actorOf(principal),
+        correlationId: ctx.requestId,
+      })
+      if (result.detached) deps.metrics.increment('market_listing_images_total', { change: 'detached' })
+      return {
+        status: 200,
+        body: {
+          // Said rather than inferred from a 200: a client retrying a DELETE whose answer it never
+          // saw can tell "I removed it" from "it was already gone", and neither is a failure.
+          detached: result.detached,
+          images: result.images.map((image) => imageWire(image, deps.studioPublicUrl)),
+        },
+      }
+    }),
+
+    /**
+     * Set the whole gallery: the reorder, and the bulk edit.
+     *
+     * A `PUT` of the complete representation, which is why it carries no idempotency wrapper — the
+     * same body sent twice leaves the same gallery. A `POST …/reorder` taking moves would be
+     * neither idempotent nor safe under two concurrent editors; see `setListingGallery`.
+     */
+    define('PUT', '/v1/listings/:id/images', async (ctx, deps) => {
+      const principal = await authenticate(ctx, deps)
+      if (principal.kind === 'service') requireScope(principal, WRITE_SCOPE)
+      const listingId = itemIdOf(ctx)
+      const body = await readJson(ctx.req)
+      await requireSeller(deps, listingId, principal)
+
+      const images = await setListingGallery(imageDeps(deps), {
+        listingId,
+        sellerSubject: subjectOf(principal),
+        images: readGallery(body['images']),
+        actor: actorOf(principal),
+        correlationId: ctx.requestId,
+      })
+      deps.metrics.increment('market_listing_images_total', { change: 'reordered' })
+      return {
+        status: 200,
+        body: { images: images.map((image) => imageWire(image, deps.studioPublicUrl)) },
       }
     }),
 
@@ -1411,6 +1600,82 @@ function listingWire(listing: Listing): Record<string, unknown> {
   }
 }
 
+/**
+ * One image on the wire.
+ *
+ * **`bytesUrl` is `null` when this deployment has not been told where a browser reaches studio.**
+ * The alternative — emitting the relative `/v1/assets/<id>/bytes` that studio's own responses use —
+ * was rejected outright: this service serves `/v1/…` on its own origin, so a browser resolving that
+ * path against the page it came from would ask MARKET for the bytes and get a 404 with no clue why.
+ * A null says "not configured" once, where a client can render it.
+ *
+ * **No `anchor`, no `verified`, no `attested`.** The checksum is on the wire because it is the
+ * estate's name for those bytes and an operator needs it to ask studio about them — not as
+ * evidence. Hearth has no Registry of Authorship contract (`tessera/src/kiln.ts:373-392`: the
+ * Solidity has never been written), so studio's `anchor.state` is `'unanchored'` on every asset
+ * that exists and a badge derived from any of this would be a check that always passes.
+ */
+function imageWire(image: ListingImage, studioPublicUrl: string | undefined): Record<string, unknown> {
+  const base = studioPublicUrl ?? ''
+  return {
+    studioAssetId: image.studioAssetId,
+    checksum: image.checksum,
+    position: image.position,
+    bytesUrl: base === '' ? null : `${base}/v1/assets/${image.studioAssetId}/bytes`,
+  }
+}
+
+/**
+ * The gallery module's dependencies, which this server already holds in full.
+ *
+ * Built here rather than taken as another `ServerDeps` field because it is exactly `{ sql,
+ * producer }` — no ledger, no indexer, no policy. A composition-root field would be two lines of
+ * wiring in `index.ts` and in every test that builds a server, all of them re-stating values that
+ * are already required arguments a few fields above.
+ */
+function imageDeps(deps: ServerDeps): { sql: Db; producer: string } {
+  return { sql: deps.sql, producer: deps.producer }
+}
+
+/**
+ * Refuse a caller who is not the listing's seller, with a 404 rather than a 403.
+ *
+ * The same rule and the same reasoning as `POST /v1/listings/:id/activate`: "something named does
+ * not exist, or belongs to somebody else. The same answer on purpose: a distinct 403 for the second
+ * is an enumeration oracle for who is selling what" (see `handle`'s status map above). This is that
+ * check, extracted once so the three image routes cannot each grow their own version of it.
+ *
+ * The domain functions re-check ownership under the listing's row lock. That is not duplication:
+ * this one exists to produce the right STATUS CODE, and that one exists to make the rule true for
+ * any caller, including one that arrives by a route written later.
+ */
+async function requireSeller(
+  deps: ServerDeps,
+  listingId: string,
+  principal: Principal,
+): Promise<Listing> {
+  const listing = await findListing(deps.sql, listingId)
+  if (!listing || listing.sellerSubject !== subjectOf(principal)) {
+    throw new NotFoundError('no such listing')
+  }
+  return listing
+}
+
+/** The `images` array a `PUT …/images` body carries: `[{studioAssetId, checksum}, …]`, in order. */
+function readGallery(value: unknown): readonly GalleryEntry[] {
+  if (!Array.isArray(value)) throw new BadRequestError('images must be an array')
+  return value.map((entry) => {
+    if (typeof entry !== 'object' || entry === null) {
+      throw new BadRequestError('each image must be an object')
+    }
+    const record = entry as Record<string, unknown>
+    return {
+      studioAssetId: requireString(record, 'studioAssetId'),
+      checksum: requireString(record, 'checksum'),
+    }
+  })
+}
+
 function orderWire(order: Order): Record<string, unknown> {
   return {
     id: order.id,
@@ -1552,9 +1817,20 @@ function operatorIdOf(principal: Principal): string {
  * that was simply about a thing that does not exist.
  */
 function itemIdOf(ctx: RequestContext): string {
-  const id = ctx.params['id'] ?? ''
-  if (!UUID.test(id)) throw new NotFoundError('no such record')
-  return id
+  return uuidParam(ctx, 'id')
+}
+
+/**
+ * The same check for any named path parameter.
+ *
+ * `itemIdOf` above reads `:id` and is what almost every route wants; `DELETE
+ * /v1/listings/:id/images/:assetId` is the first route with two uuids in its path, and it takes
+ * this rather than growing a second, subtly different copy of the same four lines.
+ */
+function uuidParam(ctx: RequestContext, name: string): string {
+  const value = ctx.params[name] ?? ''
+  if (!UUID.test(value)) throw new NotFoundError('no such record')
+  return value
 }
 
 function requireString(body: Record<string, unknown>, field: string): string {
