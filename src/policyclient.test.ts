@@ -3,20 +3,20 @@
  *
  * This file exists because the client was written against an imagined surface. It called
  * `POST /v1/decisions/market.listing`; policy has no `/v1` routes at all and takes the action in
- * the body (`policy/src/server.ts:299-541`, `parseDecisionRequest` at `:715`). Every listing check
+ * the body (`policy/src/server.ts`, `parseDecisionRequest`). Every listing check
  * therefore 404'd.
  *
  * It was first reported as the gate being bypassed — a 404 swallowed into `review` + `degraded`.
  * Checking that against the code showed the opposite, and worse: `peerDecided` is true for ANY
- * 4xx (`runtime/packages/http/src/index.ts:49-51`), so the 404 landed on the `deny` branch, and
- * `server.ts:678` turns a deny into a 403. The marketplace was not unmoderated — **it was closed.
+ * 4xx (`runtime/packages/http/src/index.ts`), so the 404 landed on the `deny` branch, and
+ * `server.ts` turns a deny into a 403. The marketplace was not unmoderated — **it was closed.
  * Every listing creation returned 403 `policy_denied`.** Worth stating precisely, because the two
  * failures need opposite fixes and guessing between them would have fixed neither.
  *
  * The defect was invisible to every existing test because they all stubbed fetch and asserted the
  * client's behaviour given a *response*, never that the request could reach a real route. So these
  * tests assert the request: its path, its action name, and the shape policy parses. Same class as
- * the recorded `wallet/src/pricingclient.ts:75-78`.
+ * the recorded `wallet/src/pricingclient.ts`.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -113,7 +113,7 @@ test('a 201 whose body cannot be read is NOT an allow', async () => {
 test('a 404 degrades rather than denying — a missing route is not a decision', async () => {
   // This is the second half of the defect and it is worse than the first. A 404 is `peerDecided`
   // (any 4xx is), so the broken route did not merely bypass the gate — it returned `deny`, and
-  // `server.ts:678` turns a deny into 403. Every listing creation on the platform was refused:
+  // `server.ts` turns a deny into 403. Every listing creation on the platform was refused:
   // the marketplace was CLOSED, not unmoderated. A route that does not exist is our
   // misconfiguration, never a verdict about a seller's listing.
   const { client } = harness({ status: 404, body: { error: { code: 'not_found', message: 'no' } } })
@@ -127,7 +127,7 @@ test('a 404 degrades rather than denying — a missing route is not a decision',
  * estate on 2026-08-04.
  *
  * `market` was started holding the compose PLACEHOLDER token. Policy answered 401. `peerDecided`
- * was true, so the client called it a `deny`, and `server.ts:678` turned that into a 403 on every
+ * was true, so the client called it a `deny`, and `server.ts` turned that into a 403 on every
  * listing by every seller. Found only because somebody tried to seed the marketplace and could
  * not create a single listing.
  *

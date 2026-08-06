@@ -2,7 +2,7 @@
  * Run a mutating operation at most once per key.
  *
  * **The shape is the ledger's** (`ledger/src/idempotency.ts`), which took it from
- * `repos/forge-pay/services/pay/src/store.ts:153`. It is not reinvented here; it is inherited,
+ * `repos/forge-pay/services/pay/src/store.ts`. It is not reinvented here; it is inherited,
  * because the four properties below are the whole of the correctness and each of them is easy to
  * lose while writing something that looks equivalent:
  *
@@ -31,7 +31,7 @@
  * through as `deps.producer`. It says which service stored the key, never which caller chose it.
  * With only the service and the route in the namespace, every principal on the estate shared one
  * key space, and `idempotency_keys.key` is a bare `text` primary key with no actor column beside
- * it (`migrations.ts:128`). Two sellers presenting the same key with the same body therefore hit
+ * it (`migrations.ts`). Two sellers presenting the same key with the same body therefore hit
  * the replay branch below, and the second was handed the FIRST one's stored response: their
  * listing was never created and they were told the id of somebody else's.
  *
@@ -130,7 +130,7 @@ function canonicalise(value: unknown): string {
  * The delimiter between the caller and the key the caller chose.
  *
  * A pipe rather than another colon, and this is the whole of the injectivity argument. A client
- * key MAY contain colons (`SAFE_IDEMPOTENCY_KEY`, `server.ts:260`) and a principal is a token
+ * key MAY contain colons (`SAFE_IDEMPOTENCY_KEY`, `server.ts`) and a principal is a token
  * subject, so with `:` on both sides the principal `user:a` with key `b:cccccccc` and the
  * principal `user:a:b` with key `cccccccc` would produce one string — which is the cross-caller
  * collision this function exists to remove, reintroduced by its own punctuation. `|` is outside
@@ -156,7 +156,7 @@ const PRINCIPAL_DELIMITER = '|'
  * A key claimed before this change is stored as `market:/v1/listings:K` and will never be found
  * again, because the same request now looks for `market:/v1/listings:user:…|K`. That is deliberate
  * and it is not fixable by a transition, for a reason worth writing down: THE OLD ROW DOES NOT
- * RECORD WHOSE IT WAS. `idempotency_keys` has no actor column (`migrations.ts:127-136`), so a
+ * RECORD WHOSE IT WAS. `idempotency_keys` has no actor column (`migrations.ts`), so a
  * compatibility read that fell back to the legacy key on a miss would be exactly the cross-caller
  * read being removed here — it would preserve the defect for the length of the transition rather
  * than close it, and preserve it precisely in the window where two callers are most likely to be

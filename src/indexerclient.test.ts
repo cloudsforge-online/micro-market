@@ -27,7 +27,7 @@
  * route. That test is the one that goes red the day somebody does own it.
  *
  * A correction to the note this file used to carry: `micro-indexer` DOES serve `/v1` paths. Its
- * `PREFIXES` (`indexer/src/server.ts:134`) mounts every domain route under both `/v1` and bare.
+ * `PREFIXES` (`indexer/src/server.ts`) mounts every domain route under both `/v1` and bare.
  * The old calls 404'd because there is no `/tokens` route and no `/escrow` sub-resource, not
  * because of the prefix.
  */
@@ -208,7 +208,7 @@ test('a 404 on token facts is an outage, never "no indicators"', async () => {
 /**
  * `micro-indexer`'s route table, as patterns, both spellings.
  *
- * Copied from `indexer/src/server.ts:153-163` (`DOMAIN`) and `:134` (`PREFIXES = ['/v1', '']`).
+ * Copied from `indexer/src/server.ts` (`DOMAIN`) and (`PREFIXES = ['/v1', '']`).
  * A copy, not an import: rule 2 of the estate's CI forbids source in one repository reaching into
  * a sibling checkout, and `micro-mint`'s CI job — `scripts/checkindexerroutes.mjs` — is the version
  * of this check that reads the real file. This one is the cheap in-suite backstop, and it goes red

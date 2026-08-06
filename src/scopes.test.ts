@@ -12,7 +12,7 @@
  * the service.
  *
  * The consequence is not a 403 on one route. identity validates its grants against the registry
- * at import and refuses to start on an unknown name (`identity/src/env.ts:141`), so an
+ * at import and refuses to start on an unknown name (`identity/src/env.ts`), so an
  * unregistered demand here is a dead identity container and therefore no tokens for anybody.
  *
  * ── WHAT THIS ASSERTS, AND WHAT IT DELIBERATELY DOES NOT ─────────────────────────────────────

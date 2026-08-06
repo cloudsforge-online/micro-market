@@ -260,7 +260,7 @@ export interface Env {
    * ══════════════════════════════════════════════════════════════════════════════════════════════
    * **THE TEN-MINUTE CLIFF, AND WHAT IT COSTS *THIS* SERVICE.**
    *
-   * `MARKET_SERVICE_TOKEN` holds a token that lives **600 seconds** (`identity/src/tokens.ts:33`,
+   * `MARKET_SERVICE_TOKEN` holds a token that lives **600 seconds** (`identity/src/tokens.ts`,
    * `SERVICE_TTL_SECONDS = 10 * 60`; identity will not lengthen it, because rotation IS expiry).
    * `index.ts` read it once, at import — `const token = () => env.serviceToken` — and handed that
    * one function to the ledger, the indexer and policy for the life of the process. So this

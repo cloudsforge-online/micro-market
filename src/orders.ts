@@ -76,7 +76,7 @@ export const PAID_OUT_TOPIC = 'market.order.paid_out'
  *
  * It is deleted rather than wired up, because the fact it names is already on the wire and has
  * been all along: a refund in this service IS a dispute resolution, and `market.dispute.resolved`
- * (moderation.ts:495) carries `resolution: 'refunded'` together with `reversalEntryId` — the
+ * (moderation.ts) carries `resolution: 'refunded'` together with `reversalEntryId` — the
  * ledger reversal the money actually moved through. A second topic for the same fact would be a
  * name a consumer could subscribe to and never once receive, which is the `emitSessionRevoked`
  * shape: a topic produced by nothing, whose subscribers are dead code that no test can see.

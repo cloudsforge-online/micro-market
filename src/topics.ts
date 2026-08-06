@@ -120,11 +120,11 @@ export const AWAITING_REGISTRATION: Readonly<Record<string, ProposedTopic>> = Ob
    *
    *   1. `micro-notify` refused the rule, because the envelope named only the offerer. Recorded as
    *      `blockedBy: 'no-subject'` with an owner, not as an omission.
-   *   2. This service added `sellerSubject` (`bids.ts:477`), read off the `for update` listing row.
-   *   3. `micro-notify` wrote the rule (`catalogue.ts:797`) and quarantined it, copying this
+   *   2. This service added `sellerSubject` (`bids.ts`), read off the `for update` listing row.
+   *   3. `micro-notify` wrote the rule (`catalogue.ts`) and quarantined it, copying this
    *      entry's spec verbatim so the two repositories could not propose two contracts for one
    *      topic.
-   *   4. `micro-contracts` pasted that spec, re-reading `keyedBy` off `:450` rather than trusting
+   *   4. `micro-contracts` pasted that spec, re-reading `keyedBy` off rather than trusting
    *      it, and both quarantines emptied.
    *
    * The registered spec is now the one `topics.test.ts` reconciles against, so nothing here needs

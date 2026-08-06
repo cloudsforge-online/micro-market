@@ -79,7 +79,7 @@ function emitSourceFiles(): readonly string[] {
  * report a topic no code path produces.
  *
  * `action:` and `scope:` lines are skipped for a sharper reason: the policy vocabulary shares this
- * namespace. `policyclient.ts:97` asks policy about `market.listing.create`, which is a permission
+ * namespace. `policyclient.ts` asks policy about `market.listing.create`, which is a permission
  * and not a topic — three lowercase segments and never emitted by anything.
  */
 function topicsInSource(): readonly string[] {
@@ -273,7 +273,7 @@ test('the delivery this relay signs is one a contract-following consumer verifie
 /**
  * A guard that proves a topic name is correct proves nothing about whether the emit is reached.
  *
- * `identity/src/sessions.ts:390` exports `emitSessionRevoked` and NOTHING CALLS IT — `revokeSession`
+ * `identity/src/sessions.ts` exports `emitSessionRevoked` and NOTHING CALLS IT — `revokeSession`
  * and `revokeAllSessions` update rows without emitting — so `identity.session.revoked` is produced
  * by dead code while identity's own guard passes, because it scans literals rather than
  * reachability. This is the cheapest check that catches that exact shape.

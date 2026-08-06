@@ -152,21 +152,21 @@ run against those two paths the prefix guard judges **zero** of them unserved, b
 with `/v1/chains/`, which really is a served prefix. A count is not a shape.
 
 It compares segment by segment now (`src/indexerclient.test.ts`, `matches`), against the route table
-copied from `indexer/src/server.ts:153-163` under both spellings of `PREFIXES`
-(`indexer/src/server.ts:134`). The dialect is `micro-mint`'s
+copied from `indexer/src/server.ts` under both spellings of `PREFIXES`
+(`indexer/src/server.ts`). The dialect is `micro-mint`'s
 (`mint/scripts/checkindexerroutes.mjs`), copied rather than invented a third time. A second test
 mutates it — five paths the indexer does not serve, including mint's real one — and requires the
 matcher to reject every one, so a guard that has quietly become vacuous fails in the suite.
 
 **Two source changes came with it.** The escrow path is now one whole template literal with every
-segment written out (`src/indexerclient.ts:201-211`); it used to build a `${scope}` holding
+segment written out (`src/indexerclient.ts`); it used to build a `${scope}` holding
 `chain/network`, and an interpolation is one opaque segment to any checker, so that path arrived at
 the guard as a four-segment shape which **matches `/transactions/:chain/:network/:hash`** — the
 wrong route, reported as fine. And the argument in `tokenFacts`' refusal was corrected: it claimed
 `mintAuthorityPresent` and `ownershipRenounced` were behind "an `eth_call` this service deliberately
 never makes", which stopped being true when `micro-indexer` gained
-`GET /tokens/:chain/:network/:address` (`indexer/src/server.ts:159`,
-`indexer/src/tokenstate.ts:207-215`). **The refusal is unchanged and stands on its remaining
+`GET /tokens/:chain/:network/:address` (`indexer/src/server.ts`,
+`indexer/src/tokenstate.ts`). **The refusal is unchanged and stands on its remaining
 grounds** — the capability is keyed by a `micro-mint` item URN the indexer has no registry for, and
 three of `TokenFacts`' eight fields need complete holder history or a custody fact about a private
 key. The dead argument is marked in place rather than deleted, because a ledger of reasoning whose

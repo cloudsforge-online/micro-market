@@ -4,20 +4,20 @@
  * ── WHY THIS FILE EXISTS ──────────────────────────────────────────────────────────────────────
  *
  * `@cloudsforge/http` retries a POST — up to three attempts — as soon as the caller supplies an
- * idempotency key (`runtime/packages/http/src/index.ts:221`):
+ * idempotency key (`runtime/packages/http/src/index.ts`):
  *
  *     const retriable = IDEMPOTENT_METHODS.has(method) || options.idempotencyKey !== undefined
  *
  * That rule infers retry-safety from the CALLER's intent rather than from the SERVER's capability,
- * which the client cannot know. `tessera/src/marketclient.ts:145` supplies a key, so every
+ * which the client cannot know. `tessera/src/marketclient.ts` supplies a key, so every
  * `POST /v1/listings` this estate makes is automatically retried on a lost response — and a lost
  * response on a call that actually succeeded is the ordinary case, not an exotic one.
  *
- * `withIdempotentRoute` (`server.ts:1206`) is supposed to absorb that. It does not, quite. Its
+ * `withIdempotentRoute` (`server.ts`) is supposed to absorb that. It does not, quite. Its
  * `run` callback is typed `() => Promise<…>` and DISCARDS the `tx` that `withIdempotency` hands it
- * (`idempotency.ts:129`), and `createListing(deps.sql, …)` then opens a transaction of its own
- * (`listings.ts:447`). So the claim and the work commit SEPARATELY, which breaks property 1
- * asserted in `idempotency.ts:9-13`. If the connection dies after the inner transaction committed
+ * (`idempotency.ts`), and `createListing(deps.sql, …)` then opens a transaction of its own
+ * (`listings.ts`). So the claim and the work commit SEPARATELY, which breaks property 1
+ * asserted in `idempotency.ts`. If the connection dies after the inner transaction committed
  * and before the outer one did, the listing is durable and the claim row is not — and the client's
  * automatic retry writes a SECOND listing for one item.
  *
@@ -27,11 +27,11 @@
  * harmless, because the artefact each one writes already has a natural unique key that a second
  * attempt collides with:
  *
- *   * `/v1/listings/:id/buy` and `/v1/offers/:id/accept` → `orders_listing_uniq` (migrations.ts:507)
- *   * `/v1/listings/:id/bids`                            → `bids_leading_uniq`  (migrations.ts:438)
- *   * `/v1/listings/:id/offers`                          → `offers_open_uniq`   (migrations.ts:467)
- *   * `/v1/orders/:id/disputes`                          → `disputes_open_uniq` (migrations.ts:632)
- *   * `/v1/moderation/cases`                     → `moderation_open_freeze_uniq` (migrations.ts:602)
+ *   * `/v1/listings/:id/buy` and `/v1/offers/:id/accept` → `orders_listing_uniq` (migrations.ts)
+ *   * `/v1/listings/:id/bids`                            → `bids_leading_uniq`  (migrations.ts)
+ *   * `/v1/listings/:id/offers`                          → `offers_open_uniq`   (migrations.ts)
+ *   * `/v1/orders/:id/disputes`                          → `disputes_open_uniq` (migrations.ts)
+ *   * `/v1/moderation/cases`                     → `moderation_open_freeze_uniq` (migrations.ts)
  *
  * `listings` was the one artefact with no natural key at all, which is exactly why the escape was
  * reachable there and nowhere else. The fix does not restructure the transactions — a claim held
@@ -44,7 +44,7 @@
  * violation is the correctness path; `findListingByIdempotencyKey` is only an optimisation that
  * saves the loser a wasted INSERT. This mirrors what the ledger already does one layer down —
  * `journal_entries_idempotency_key_uniq` beside `idempotency_keys.key`, two independent invariants
- * describing the same thing (`ledger/src/idempotency.ts:99-108`) — and what custody's migration 6
+ * describing the same thing (`ledger/src/idempotency.ts`) — and what custody's migration 6
  * did for `custody_keys`.
  *
  * The second test below is the one that matters. A naive `Promise.all` of two calls passes

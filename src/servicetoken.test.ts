@@ -4,7 +4,7 @@
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  * ## The defect, as measured rather than as reasoned about
  *
- * `MARKET_SERVICE_TOKEN` held a token that lives **600 seconds** (`identity/src/tokens.ts:33`).
+ * `MARKET_SERVICE_TOKEN` held a token that lives **600 seconds** (`identity/src/tokens.ts`).
  * The composition root read it once, at import — `const token = () => env.serviceToken` — and
  * handed that to the ledger, the indexer and policy. On the live estate the token inside
  * `cloudsforge-estate-market-1` had been expired for **63,056 seconds** — seventeen and a half
@@ -14,7 +14,7 @@
  *
  * ## Why the visible symptom was nothing at all
  *
- * `policyclient.ts:183-188` is correct and stays correct: a 401 is policy refusing US, not policy
+ * `policyclient.ts` is correct and stays correct: a 401 is policy refusing US, not policy
  * judging the listing, so it degrades rather than denying. That is what stops a seller being told
  * they are banned by our own misconfiguration. It is also what made this invisible — the
  * marketplace kept working, and **every listing on it went up with no moderation decision ever
@@ -81,7 +81,7 @@ const INDEXER = 'http://indexer:4000'
 /** Fabricated: identity's shape, none of its entropy. Never a value out of `tokens.env`. */
 const CREDENTIAL = 'cfsc_0000000000000000000000000000000000000test'
 
-/** identity/src/tokens.ts:33. Unchanged by this fix, and it must stay unchanged — rotation IS expiry. */
+/** identity/src/tokens.ts. Unchanged by this fix, and it must stay unchanged — rotation IS expiry. */
 const SERVICE_TTL_SECONDS = 600
 
 /** What this service actually demands of its own token, read from the files that declare it. */

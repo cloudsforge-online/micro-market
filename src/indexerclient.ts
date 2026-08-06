@@ -38,7 +38,7 @@ import type { LiveScope } from '@cloudsforge/contracts-auth'
  *
  * Both routes this file calls are reads — `GET /v1/tokens/:urn/facts` and
  * `GET /transactions/…/confirmations` — and every read route in indexer goes through
- * `authoriseRead`, which demands `READ_SCOPE = 'indexer:read'` (`indexer/src/server.ts:89,727`).
+ * `authoriseRead`, which demands `READ_SCOPE = 'indexer:read'` (`indexer/src/server.ts,727`).
  * `indexer:write` gates the watch routes only, and market registers no watches.
  *
  * `readonly LiveScope[]` rather than `readonly string[]`: see the header of `policyclient.ts`, where
@@ -193,8 +193,8 @@ export function httpIndexerClient(options: IndexerClientOptions): IndexerClient 
         // are contract state behind "an `eth_call` this service deliberately never makes". The
         // indexer makes one now: `GET /tokens/:chain/:network/:address` reads exactly those two
         // fields by `eth_call`, at the indexer's own canonical head and only after proving the
-        // provider still serves that head (`indexer/src/server.ts:159`,
-        // `indexer/src/tokenstate.ts:207-215`). So two of the eight fields became available — keyed
+        // provider still serves that head (`indexer/src/server.ts`,
+        // `indexer/src/tokenstate.ts`). So two of the eight fields became available — keyed
         // by CONTRACT ADDRESS, which is the first bullet, not by the item URN this method is given.
         //
         // So the indicators wait on a token registry, not on a route. Until then the honest
@@ -212,7 +212,7 @@ export function httpIndexerClient(options: IndexerClientOptions): IndexerClient 
     async escrowStatus(chain, network, txHash) {
       // The indexer's own convention: the RESOURCE first, then `:chain/:network`, then the key.
       // Not a `/v1` prefix invented here — the gateway adds and strips that publicly, and it is
-      // served either way (`indexer/src/server.ts:134`, `PREFIXES = ['/v1', '']`).
+      // served either way (`indexer/src/server.ts`, `PREFIXES = ['/v1', '']`).
       //
       // ONE template literal, WHOLE, with every segment written out. `indexerclient.test.ts` scans
       // this file for the paths it requests and compares them against the indexer's route patterns

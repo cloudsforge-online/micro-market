@@ -470,7 +470,7 @@ export async function makeOffer(
         //
         // It is a SUBJECT, not a user id — `user:<uuid>` or `service:<name>`, exactly as
         // `offererSubject` beside it and `sellerSubject` on `market.order.paid_out` already are.
-        // A listing may be owned by a service principal (`server.ts:713` takes the seller from
+        // A listing may be owned by a service principal (`server.ts` takes the seller from
         // `subjectOf(principal)`, which spells a service `service:<name>`), and a consumer that
         // stripped the prefix blindly would address a notification to a service name. Never null
         // and never empty: `listings.seller_subject` is `not null`, and the self-offer refusal

@@ -479,7 +479,7 @@ describe('listings', { skip }, () => {
   })
 
   test('expiredListings uses the DATABASE clock, so N replicas agree', async () => {
-    // One clock domain. The lesson from billing/src/entitlements.ts:169, where a row stamped by
+    // One clock domain. The lesson from billing/src/entitlements.ts, where a row stamped by
     // Postgres and compared against the application's clock made a just-granted entitlement read
     // as inactive on a host with 60ms of skew. Here that skew would expire a listing mid-auction.
     const listing = await seedListing(h, { expiresAt: new Date(Date.now() + 3_600_000) })

@@ -32,7 +32,7 @@ import type { LiveScope } from '@cloudsforge/contracts-auth'
  * ── IT SAID `policy:evaluate`, AND NO SUCH SCOPE HAS EVER EXISTED ────────────────────────────
  *
  * `@cloudsforge/contracts-auth` registers `policy:decide`, and policy gates the only route this
- * file calls on exactly that: `DECIDE_SCOPE = 'policy:decide'` (`policy/src/server.ts:83`). The
+ * file calls on exactly that: `DECIDE_SCOPE = 'policy:decide'` (`policy/src/server.ts`). The
  * registry was checked on both sides before this line was edited — the report naming it was
  * treated as a claim, not evidence — and the registry is the correct side.
  *
@@ -60,7 +60,7 @@ import type { LiveScope } from '@cloudsforge/contracts-auth'
  *
  * `LiveScope = Exclude<Scope, DeprecatedScope>` and `DeprecatedScope` is computed FROM `SCOPES`
  * by a conditional type over the `deprecated` field, not hand-listed, so it cannot drift from the
- * registry (`contracts/packages/auth/src/index.ts:507`). `Scope` keeps its wide meaning on
+ * registry (`contracts/packages/auth/src/index.ts`). `Scope` keeps its wide meaning on
  * purpose: reading a token is wide — one may arrive carrying a scope that has since died — and
  * demanding is narrow. This is the demanding direction.
  */
@@ -116,13 +116,13 @@ export function httpPolicyClient(options: PolicyClientOptions): PolicyClient {
     async evaluateListing(input) {
       try {
         // `POST /decisions`, not `/v1/decisions/market.listing`. Policy has NO `/v1` routes at
-        // all (`policy/src/server.ts:299-541`) and takes the action in the body rather than the
+        // all (`policy/src/server.ts`) and takes the action in the body rather than the
         // path, so every call this client made returned 404 — and the fail-open branch below
         // swallowed it as `review` + `degraded`. The gate was therefore not degraded, it was
         // ABSENT, which is precisely the failure the header above says is worse than either
         // alternative. Found by micro-foresight while it built its own policy client against
         // policy's actual route table; same class as the recorded
-        // `wallet/src/pricingclient.ts:75-78`, and the reason consumer-driven contract tests
+        // `wallet/src/pricingclient.ts`, and the reason consumer-driven contract tests
         // exist.
         //
         // The action is `market.listing.create`, spelled as policy's closed registry spells it
@@ -141,7 +141,7 @@ export function httpPolicyClient(options: PolicyClientOptions): PolicyClient {
             context: {
               // A DECIMAL STRING. Policy rejects a JSON number outright rather than coercing it,
               // because a threshold comparison on a float is the bug that service exists not to
-              // have (`policy/src/server.ts:667-673`).
+              // have (`policy/src/server.ts`).
               amount: input.amount,
               asset: input.assetCode,
               assetKind: input.assetKind,
@@ -165,7 +165,7 @@ export function httpPolicyClient(options: PolicyClientOptions): PolicyClient {
         // A 404 or 405 is NOT policy deciding — it is policy not having that route, which is a
         // deployment or client error and says nothing about this listing. Treating it as a
         // decision is how the broken path above became a 403 on every single listing: `deny` is
-        // honoured at `server.ts:678`, so a misspelled route closed the entire marketplace rather
+        // honoured at `server.ts`, so a misspelled route closed the entire marketplace rather
         // than leaving it unmoderated. Between "shut the market because we misconfigured
         // ourselves" and "list it and flag it", this file's header already chose: fail open, and
         // leave evidence.

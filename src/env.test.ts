@@ -37,7 +37,7 @@ const REQUIRED: Record<string, string> = {
  * **`MARKET_SERVICE_TOKEN` used to be in the block above, and taking it out is the fix, not a
  * relaxation.**
  *
- * It is a token with a hard-coded 600-second life (`identity/src/tokens.ts:33`) that nothing can
+ * It is a token with a hard-coded 600-second life (`identity/src/tokens.ts`) that nothing can
  * renew. Requiring it kept a BOOT DEPENDENCY on the thing being retired: a container given the
  * long-lived `MARKET_IDENTITY_CREDENTIAL` and no token is correctly configured, and refusing to
  * start it would be this service insisting on its own defect. The tests below hold the replacement

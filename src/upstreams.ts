@@ -4,12 +4,12 @@
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  * ## THE MODERATION GATE THAT WAS NOT ABSENT BY DESIGN
  *
- * `MARKET_SERVICE_TOKEN` held a token that lives **600 seconds** (`identity/src/tokens.ts:33`).
+ * `MARKET_SERVICE_TOKEN` held a token that lives **600 seconds** (`identity/src/tokens.ts`).
  * The composition root read it once, at import:
  *
- *     const token = () => env.serviceToken        // index.ts:83, for the life of the process
+ *     const token = () => env.serviceToken        // index.ts, for the life of the process
  *
- * and handed that one function to the ledger (`:84`), the indexer (`:90`) and policy (`:95`). There
+ * and handed that one function to the ledger, the indexer and policy. There
  * was no `ServiceTokenProvider`, no `POST /service-tokens/exchange` and no `cfsc_` anywhere in
  * `src/` — checked by grep, not inferred. So every outbound call this service makes authenticated
  * **once per bootstrap** and never again, while the container ran for days.
@@ -23,7 +23,7 @@
  *
  * ## WHY THIS IS THE SECOND HALF OF A FIX AND NOT THE WHOLE OF ONE
  *
- * `policyclient.ts:183-188` (commit 51b3dd0) already reads a 401 as **policy refusing US**, not as
+ * `policyclient.ts` (commit 51b3dd0) already reads a 401 as **policy refusing US**, not as
  * policy judging the listing, so no seller is told they are banned because of our misconfiguration.
  * That was the urgent half and it is done. What it cannot do is make the call succeed. With it, the
  * marketplace is open and **unmoderated on every single listing** — and the header of

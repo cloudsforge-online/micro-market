@@ -530,7 +530,7 @@ export async function resolveDispute(
         // that ends it. A half-fixed pair reads as fixed from either end alone.
         //
         // Both spellings, for the two different readers this event has:
-        //   - `raiserSubject` off the dispute row this transaction holds `for update` (:437), so
+        //   - `raiserSubject` off the dispute row this transaction holds `for update`, so
         //     it is the raiser as recorded rather than as re-derived.
         //   - `counterpartySubject` by the same derivation `openDispute` uses, and legitimate for
         //     the same reason: `openDispute` admits only the buyer or the seller, so the raiser is

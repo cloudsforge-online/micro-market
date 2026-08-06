@@ -7,14 +7,14 @@
  * `SERVICE` from `index.ts`, which names MARKET ITSELF — plus the route and the caller's
  * `Idempotency-Key` header. Nothing in that triple identified the CALLER, and
  * `idempotency_keys.key` is a bare `text` primary key with no actor column beside it
- * (`migrations.ts:128`). One namespace, every principal in it.
+ * (`migrations.ts`). One namespace, every principal in it.
  *
  * The fingerprint did not save it either. It is taken over the request body — the body alone at
  * `POST /v1/listings`, `{ listingId, ...body }` at the four listing-scoped routes — and the
  * authenticated principal is used only INSIDE `run` (`sellerSubject`, `buyerSubject`,
  * `bidderSubject`, `offererSubject`, `raiserSubject`, `openedBy`). It never reached the hash.
  *
- * So two sellers who chose the same key for the same item collided, and `idempotency.ts:159`
+ * So two sellers who chose the same key for the same item collided, and `idempotency.ts`
  * handed the second one the FIRST one's stored response with `replayed: true`. The second seller's
  * listing was never created and they were told the id of somebody else's. A client deriving its
  * key from the payload — a common and defensible reading of what an idempotency key is — collides

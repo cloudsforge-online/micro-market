@@ -1274,7 +1274,7 @@ function buildRoutes(): Route[] {
       const orderId = itemIdOf(ctx)
       // Wrapped, like every other mutating route on this service — this one was not, and
       // `openDispute` is a plain INSERT with no natural-key uniqueness behind it
-      // (`moderation.ts:375`). So a double-clicked button, or any client that retried a request
+      // (`moderation.ts`). So a double-clicked button, or any client that retried a request
       // whose response it never saw, opened TWO disputes on one order and froze the listing
       // twice. Found by micro-sdk while cataloguing which public routes require an
       // Idempotency-Key: the answer for this one was "none", and it should never have been.
@@ -1611,7 +1611,7 @@ function listingWire(listing: Listing): Record<string, unknown> {
  *
  * **No `anchor`, no `verified`, no `attested`.** The checksum is on the wire because it is the
  * estate's name for those bytes and an operator needs it to ask studio about them — not as
- * evidence. Hearth has no Registry of Authorship contract (`tessera/src/kiln.ts:373-392`: the
+ * evidence. Hearth has no Registry of Authorship contract (`tessera/src/kiln.ts`: the
  * Solidity has never been written), so studio's `anchor.state` is `'unanchored'` on every asset
  * that exists and a badge derived from any of this would be a check that always passes.
  */

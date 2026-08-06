@@ -537,7 +537,7 @@ export async function createListing(
     // the re-read cannot happen on `tx` — every statement there would fail with 25P02. Catching
     // out here means the read runs on a healthy connection, and it means the read happens only
     // after the winner's transaction has ended, so what it finds is committed rather than in
-    // flight. The same structure as `custody/src/keys.ts:239`.
+    // flight. The same structure as `custody/src/keys.ts`.
     const replayed = await afterLosingTheRace(sql, key, err)
     if (replayed) return replayed
     throw err
@@ -865,7 +865,7 @@ export async function listListings(sql: Db, query: ListingQuery = {}): Promise<r
  * Active listings whose `expires_at` has passed. The expiry sweep's read.
  *
  * `now()` is the DATABASE's clock and the comparison happens in the database, so there is one
- * clock domain rather than two — the lesson from `billing/src/entitlements.ts:169`, where a row
+ * clock domain rather than two — the lesson from `billing/src/entitlements.ts`, where a row
  * stamped by Postgres and compared against the application's clock made a just-granted
  * entitlement read as inactive on a host with 60ms of skew. Here the same skew would expire a
  * listing early, releasing an item mid-auction.

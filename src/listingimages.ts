@@ -39,13 +39,13 @@
  * ## THE CHECKSUM IS RECORDED, NOT VERIFIED, AND CERTAINLY NOT ATTESTED
  *
  * `checksum` is `sha256:<64 lowercase hex>` — studio's spelling (`studio/src/assets.ts`) and
- * tessera's (`tessera/src/migrations.ts:603`), because the estate has one vocabulary for a content
+ * tessera's (`tessera/src/migrations.ts`), because the estate has one vocabulary for a content
  * address rather than two dialects. It is stored so that two systems can talk about the same bytes
  * and so an operator can ask studio about a listing's image by its address.
  *
  * **It is not evidence of anything.** Studio computed it; this row remembers what the client said
  * studio said. And there is no chain behind it: Hearth has NO Registry of Authorship contract —
- * `tessera/src/kiln.ts:373-392` records that the Solidity has never been written, and mint's
+ * `tessera/src/kiln.ts` records that the Solidity has never been written, and mint's
  * catalogue can only deploy three ERC-20 variants — so studio's own `anchor.state` is
  * `'unanchored'` on every asset that exists today. No payload, response or screen produced from
  * this table may call an image "verified", "attested", "anchored" or "on-chain". On a platform

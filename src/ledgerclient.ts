@@ -38,7 +38,7 @@ import type { LiveScope } from '@cloudsforge/contracts-auth'
  * The scopes this service's token must carry to call the ledger.
  *
  * `ledger:post` alone, and that is the whole of it: this client has exactly one method and it
- * posts to `POST /entries`, gated on `POST_SCOPE = 'ledger:post'` (`ledger/src/server.ts:78,347`).
+ * posts to `POST /entries`, gated on `POST_SCOPE = 'ledger:post'` (`ledger/src/server.ts,347`).
  * Market's escrow is a POSTING to an escrow account, never a ledger reservation — the header
  * above says so — so `ledger:reserve` would be authority this service has no call site for, and
  * `ledger:read` likewise: market asks the ledger nothing.
