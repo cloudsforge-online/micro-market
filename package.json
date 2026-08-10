@@ -31,9 +31,17 @@
     "sources. On publish their publishConfig points at dist/, tsx moves to devDependencies, and the",
     "image runs 'node dist/index.js'."
   ],
+  "_contractsChain": [
+    "Taken for ONE type: IssuableAssetCode, which is Exclude<AssetCode, 'SHARD'>. engagement.ts",
+    "declares the programme's unit with it, so a change that routed the engagement grant back",
+    "through a retired asset fails typecheck instead of posting cleanly and freezing SHARD",
+    "(micro-org#226). A string literal would have compiled either way, which is how the SHARD",
+    "spelling survived from migration 11 until 2026-08-10."
+  ],
   "dependencies": {
     "@cloudsforge/auth": "link:../runtime/packages/auth",
     "@cloudsforge/contracts-auth": "link:../contracts/packages/auth",
+    "@cloudsforge/contracts-chain": "link:../contracts/packages/chain",
     "@cloudsforge/contracts-money": "link:../contracts/packages/money",
     "@cloudsforge/contracts-events": "link:../contracts/packages/events",
     "@cloudsforge/db": "link:../runtime/packages/db",

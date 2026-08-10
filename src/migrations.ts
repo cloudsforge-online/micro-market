@@ -972,6 +972,88 @@ export const MIGRATIONS: readonly Migration[] = [
       -- gallery order — so a second index on the same columns would be write cost for nothing.
     `,
   },
+  {
+    version: 14,
+    name: 'engagement_in_ember_wei',
+    up: `
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+      -- THE ENGAGEMENT PROGRAMME IS EMBER, NOT SHARD — micro-org#226.
+      --
+      -- Migration 11 spelled every figure in this programme '_shards', and 'engagement.ts'
+      -- posted both legs of a grant with assetCode 'SHARD', citing 21 §2's "denominated in
+      -- Shards". That sentence in 21 §2 has said "denominated in EMBER" since 2026-08-07, and
+      -- SHARD has been retired since 2026-08-04 — 'RETIRED_ASSETS' in contracts/packages/chain,
+      -- where 'assertIssuable' refuses it by name.
+      --
+      -- ── WHY THIS WAS NOT FAILING, WHICH IS THE ONLY REASON IT SURVIVED ────────────────────
+      --
+      -- micro-ledger's retired-asset guard is scoped to the ACQUISITION kinds — purchase,
+      -- subscription_charge, deposit_credited — and deliberately leaves 'transfer' legal so the
+      -- SHARD already in user hands can be drained. An engagement grant is neither, so it posts
+      -- cleanly. It does not fail; it just moves an asset nothing can issue.
+      --
+      -- ── WHY IT WOULD HAVE BEEN UNRECOVERABLE THE FIRST TIME IT RAN ────────────────────────
+      --
+      -- The bounty leg credits a SELLER: a user LIABILITY account. Measured on mainnet
+      -- 2026-08-10, SHARD reconciles by comparing the sum of custody-asset accounts against the
+      -- sum of user liabilities — one asset account of 13,000 against thirteen liability
+      -- accounts of 1,000 each, drift 0, 'asset_freezes' empty. A grant raises the liability
+      -- side and nothing raises the asset side, so the next run's drift is non-zero;
+      -- LEDGER_RECONCILE_TOLERANCE is unset and 'withinTolerance' fails CLOSED, so non-zero
+      -- means the asset freezes; and only an exactly-zero run lifts a freeze. Lifting it would
+      -- mean issuing SHARD, which is the one thing 'assertIssuable' exists to refuse. The first
+      -- bounty this service ever paid would have frozen SHARD permanently.
+      --
+      -- ── WHY A RENAME, NOT EXPAND/CONTRACT ─────────────────────────────────────────────────
+      --
+      -- Measured on live mainnet 2026-08-10: 'engagement_windows' 0 rows, 'engagement_grants'
+      -- 0 rows, and the ledger holds no account whose subject matches 'engagement' in any asset.
+      -- Nothing is in flight to protect, and two spellings of one budget would leave the
+      -- programme running two treasuries — the ledger keys an account on
+      -- (subject, asset_code, purpose), so a second asset spelling is a second account that
+      -- neither reconciles against the first nor reports as broken.
+      --
+      -- ── THE RATE IS FROZEN HERE ON PURPOSE ────────────────────────────────────────────────
+      --
+      -- SHARD has 0 decimals and EMBER has 18, so this is a conversion and not a relabelling.
+      -- 1 Shard = 1 US cent ('SHARDS_PER_USD' = 100); 1 EMBER = 0.25 USD (pricing's
+      -- 'administered_prices', usd_scaled 250000 against RATE_SCALE 1e6, unchanged since
+      -- 2026-08-04 and read again on 2026-08-10) => 1 Shard = 40000000000000000 wei. The
+      -- literal is frozen into this file because a migration runs once and is checksummed
+      -- afterwards, while an administered price is one operator-editable row. micro-admin-api's
+      -- migration 13 and micro-worlds' migration 11 freeze the identical constant.
+      --
+      -- ── WHY THE CHECKS ARE NOT DROPPED AND REBUILT ────────────────────────────────────────
+      --
+      -- 'engagement_windows_within_budget', '_budget_positive', '_bounty_pair',
+      -- '_bounty_nonnegative' and 'engagement_grants_amount_positive' all name these columns,
+      -- and every one of them follows the rename by itself: Postgres stores a CHECK expression
+      -- as a parse tree over attribute numbers, so RENAME COLUMN rewrites what the constraint
+      -- reads without rewriting the constraint. That is NOT true of a plpgsql trigger body,
+      -- which is text resolved at execution time — micro-admin-api's migration 13 and
+      -- micro-worlds' migration 11 both had to drop their triggers before restating their data
+      -- for exactly that reason, and this table has no trigger. The replay test asserts the
+      -- constraints still bite on the new names rather than trusting this paragraph.
+      --
+      -- Both columns of the budget pair move in ONE statement, so 'within_budget' is never
+      -- observed half-converted; a CHECK is evaluated once the row update is complete. And
+      -- multiplying by a positive constant preserves every one of these predicates — a zero
+      -- bounty stays zero, so 'bounty_pair' still agrees with 'bounty_max_listings'.
+      -- ══════════════════════════════════════════════════════════════════════════════════════
+      alter table engagement_windows rename column budget_shards to budget_wei;
+      alter table engagement_windows rename column spent_shards  to spent_wei;
+      alter table engagement_windows rename column bounty_shards to bounty_wei;
+      alter table engagement_grants  rename column amount_shards to amount_wei;
+
+      update engagement_windows
+         set budget_wei = budget_wei * 40000000000000000,
+             spent_wei  = spent_wei  * 40000000000000000,
+             bounty_wei = bounty_wei * 40000000000000000;
+
+      update engagement_grants
+         set amount_wei = amount_wei * 40000000000000000;
+    `,
+  },
 ]
 
 /**

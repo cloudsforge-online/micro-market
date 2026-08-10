@@ -9,7 +9,8 @@
 
 import { after, before, beforeEach, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import type postgres from 'postgres'
+import postgres from 'postgres'
+import { migrate } from '@cloudsforge/db'
 import { BASELINE_VERSION, MIGRATIONS, SCHEMA_VERSION, TABLES } from './migrations.ts'
 import { migrateTestDb, openDb, resetMarket, skip } from './testsupport.ts'
 
@@ -492,4 +493,116 @@ describe('the schema, against a real Postgres', { skip }, () => {
       assert.equal(row.numeric_scale, 0, `${row.table_name}.${row.column_name}`)
     }
   })
+})
+
+/**
+ * Migration 14 replayed against a database that predates it — micro-org#226.
+ *
+ * The rest of this file proves the schema AT HEAD refuses what it should. This one proves the
+ * UPGRADE: it brings a scratch schema to version 13, writes the rows a pre-#226 database would
+ * hold, applies 14, and reads them back. A migration that is only ever run against an empty test
+ * database is a migration whose conversion arithmetic nothing has checked.
+ *
+ * The scratch schema is a second connection with its own `search_path`, so this runs against the
+ * same Postgres as everything else without touching the shared `public` schema — the suite's
+ * other files truncate `public` between cases and would otherwise race this.
+ */
+test('migration 14 converts the engagement figures at 4e16, and the CHECKs follow the rename', { skip }, async () => {
+  const SCHEMA = 'mig14_replay'
+  const WEI_PER_SHARD = 40_000_000_000_000_000n
+  const admin = openDb(2)
+  let scratch: postgres.Sql | undefined
+  try {
+    await admin.unsafe(`drop schema if exists ${SCHEMA} cascade`)
+    await admin.unsafe(`create schema ${SCHEMA}`)
+    scratch = postgres(process.env['MARKET_TEST_DATABASE_URL']!, {
+      max: 2,
+      onnotice: () => {},
+      connection: { search_path: SCHEMA },
+    })
+
+    // ── the world before #226 ────────────────────────────────────────────────────────────────
+    await migrate(
+      scratch as never,
+      MIGRATIONS.filter((migration) => migration.version <= 13),
+      { service: 'market-mig14-replay' },
+    )
+    const listing = await scratch<{ id: string }[]>`
+      insert into listings ${scratch({
+        seller_subject: 'user:alice',
+        asset_kind: 'collectible',
+        item_urn: 'cf:mint:token:1',
+        quantity: '1',
+        item_asset_code: 'TOKEN:cf:mint:token:1',
+        pricing_mode: 'fixed',
+        price: '1000',
+        asset_code: 'SHARD',
+        settlement_mode: 'custodial',
+        platform_fee_bps: 250,
+      })}
+      returning id
+    `
+    const listingId = listing[0]!.id
+    const opened = await scratch<{ id: string }[]>`
+      insert into engagement_windows
+        (name, starts_at, ends_at, budget_shards, spent_shards, bounty_shards, bounty_max_listings, created_by)
+      values ('launch week', now() - interval '1 hour', now() + interval '1 hour',
+              10000, 250, 100, 3, 'user:op')
+      returning id
+    `
+    const windowId = opened[0]!.id
+    await scratch`
+      insert into engagement_grants
+        (window_id, grant_kind, beneficiary, listing_id, amount_shards, ledger_entry_id)
+      values (${windowId}, 'first_listing_bounty', 'user:alice', ${listingId}, 25, 'entry-1')
+    `
+
+    // ── the upgrade ─────────────────────────────────────────────────────────────────────────
+    await migrate(scratch as never, MIGRATIONS, { service: 'market-mig14-replay' })
+
+    const [window] = await scratch<{ budget: string; spent: string; bounty: string }[]>`
+      select budget_wei::text as budget, spent_wei::text as spent, bounty_wei::text as bounty
+        from engagement_windows where id = ${windowId}
+    `
+    assert.equal(window!.budget, (10_000n * WEI_PER_SHARD).toString())
+    assert.equal(window!.spent, (250n * WEI_PER_SHARD).toString())
+    assert.equal(window!.bounty, (100n * WEI_PER_SHARD).toString())
+
+    const [grant] = await scratch<{ amount: string }[]>`
+      select amount_wei::text as amount from engagement_grants where window_id = ${windowId}
+    `
+    assert.equal(grant!.amount, (25n * WEI_PER_SHARD).toString())
+
+    // The old names are gone rather than shadowed. Two spellings of one budget is the state this
+    // migration exists to avoid, so it is asserted rather than assumed.
+    const columns = await scratch<{ column_name: string }[]>`
+      select column_name from information_schema.columns
+       where table_schema = ${SCHEMA}
+         and table_name in ('engagement_windows','engagement_grants')
+         and column_name like '%shards%'
+    `
+    assert.deepEqual([...columns], [])
+
+    // ── the CHECKs followed the rename by themselves ────────────────────────────────────────
+    //
+    // Postgres stores a CHECK as a parse tree over attribute numbers, so RENAME COLUMN rewrites
+    // what the constraint reads. This is the assertion that makes migration 14's decision NOT to
+    // drop and rebuild them safe to rely on — and the reason it differs from micro-admin-api's
+    // migration 13 and micro-worlds' migration 11, both of which had to drop plpgsql triggers,
+    // whose bodies are text resolved at execution time.
+    await assert.rejects(
+      scratch`update engagement_windows set spent_wei = budget_wei + 1 where id = ${windowId}`,
+      /engagement_windows_within_budget/,
+      'the budget bound must still bite on the new column names',
+    )
+    await assert.rejects(
+      scratch`update engagement_grants set amount_wei = 0 where window_id = ${windowId}`,
+      /engagement_grants_amount_positive/,
+      'a grant of nothing must still be unwritable',
+    )
+  } finally {
+    if (scratch) await scratch.end({ timeout: 5 })
+    await admin.unsafe(`drop schema if exists ${SCHEMA} cascade`)
+    await admin.end({ timeout: 5 })
+  }
 })
