@@ -294,6 +294,7 @@ export function registerHandlers(runner: JobRunner, deps: JobDeps): JobRunner {
               windowId: listing.engagementWindowId,
               waivedFeeBps: listing.engagementWaivedFeeBps,
               price: result.order.amount,
+              assetCode: listing.assetCode,
               correlationId: `close:${listingId}`,
             },
           ).catch((err: unknown) => {

@@ -364,6 +364,14 @@ export interface SeedListingOptions {
   readonly sellerWalletId?: string
   readonly itemUrn?: string
   readonly activate?: boolean
+  /**
+   * What the listing is PRICED in. Defaults to SHARD, which is what every existing case was
+   * seeded with and which is still a legal price: SHARD is retired for issuance, not for
+   * transfer, and thirteen live accounts hold it. The engagement cases need EMBER, because the
+   * subsidy is a fraction of the price and the programme is denominated in EMBER wei
+   * (micro-org#226) — so the two assets have to be tellable apart here.
+   */
+  readonly assetCode?: 'SHARD' | 'EMBER'
 }
 
 /**
@@ -390,7 +398,7 @@ export async function seedListing(
     // wrote `price: null` was asking not to happen.
     price: options.price !== undefined ? options.price : 1_000n,
     reservePrice: options.reservePrice ?? null,
-    assetCode: 'SHARD',
+    assetCode: options.assetCode ?? 'SHARD',
     settlementMode: options.settlementMode ?? 'custodial',
     sellerWalletId:
       options.sellerWalletId ?? (options.settlementMode === 'onchain' ? 'wallet-seller' : null),

@@ -30,12 +30,25 @@
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 
+import type { IssuableAssetCode } from '@cloudsforge/contracts-chain'
 import { ENGAGEMENT_GRANT_KIND, engagementAccount } from '@cloudsforge/contracts-money'
 import type { LedgerClient, PostingRequest } from './ledgerclient.ts'
 import type { Db, Tx } from './outbox.ts'
 
-/** Shards are the engagement programme's unit — 21 §2, "denominated in Shards". */
-const SHARD = 'SHARD' as const
+/**
+ * EMBER wei is the engagement programme's unit — 21 §2, "bounded, disclosed, and denominated in
+ * EMBER".
+ *
+ * This said `const SHARD = 'SHARD'` until 2026-08-10 (micro-org#226), under a citation of the
+ * same paragraph, which read "denominated in Shards" until 2026-08-07. SHARD was retired on
+ * 2026-08-04: `RETIRED_ASSETS` in `@cloudsforge/contracts-chain`, where `assertIssuable` refuses
+ * it by name. Migration 14 converted the columns beside this at the rate frozen there.
+ *
+ * **The type is what keeps it EMBER.** `IssuableAssetCode` is `Exclude<AssetCode, 'SHARD'>`, so
+ * a change that pointed this back at a retired asset does not compile. A bare string literal
+ * compiled either way, which is precisely how the old spelling survived three months of review.
+ */
+export const ENGAGEMENT_ASSET: IssuableAssetCode = 'EMBER'
 
 export type GrantKind = 'listing_fee_subsidy' | 'first_listing_bounty'
 
@@ -55,9 +68,9 @@ export interface EngagementWindow {
   readonly name: string
   readonly startsAt: Date
   readonly endsAt: Date
-  readonly budgetShards: bigint
-  readonly spentShards: bigint
-  readonly bountyShards: bigint
+  readonly budgetWei: bigint
+  readonly spentWei: bigint
+  readonly bountyWei: bigint
   readonly bountyMaxListings: number
   readonly createdBy: string
   readonly createdAt: Date
@@ -68,16 +81,16 @@ interface WindowRow {
   readonly name: string
   readonly starts_at: Date
   readonly ends_at: Date
-  readonly budget_shards: string
-  readonly spent_shards: string
-  readonly bounty_shards: string
+  readonly budget_wei: string
+  readonly spent_wei: string
+  readonly bounty_wei: string
   readonly bounty_max_listings: number
   readonly created_by: string
   readonly created_at: Date
 }
 
-const WINDOW_COLUMNS = `id, name, starts_at, ends_at, budget_shards::text, spent_shards::text,
-                        bounty_shards::text, bounty_max_listings, created_by, created_at`
+const WINDOW_COLUMNS = `id, name, starts_at, ends_at, budget_wei::text, spent_wei::text,
+                        bounty_wei::text, bounty_max_listings, created_by, created_at`
 
 function toWindow(row: WindowRow): EngagementWindow {
   return {
@@ -85,9 +98,9 @@ function toWindow(row: WindowRow): EngagementWindow {
     name: row.name,
     startsAt: row.starts_at,
     endsAt: row.ends_at,
-    budgetShards: BigInt(row.budget_shards),
-    spentShards: BigInt(row.spent_shards),
-    bountyShards: BigInt(row.bounty_shards),
+    budgetWei: BigInt(row.budget_wei),
+    spentWei: BigInt(row.spent_wei),
+    bountyWei: BigInt(row.bounty_wei),
     bountyMaxListings: row.bounty_max_listings,
     createdBy: row.created_by,
     createdAt: row.created_at,
@@ -121,8 +134,8 @@ export interface OpenWindowInput {
   readonly name: string
   readonly startsAt: Date
   readonly endsAt: Date
-  readonly budgetShards: bigint
-  readonly bountyShards: bigint
+  readonly budgetWei: bigint
+  readonly bountyWei: bigint
   readonly bountyMaxListings: number
   readonly operator: string
 }
@@ -137,10 +150,10 @@ export interface OpenWindowInput {
 export async function openWindow(tx: Tx, input: OpenWindowInput): Promise<EngagementWindow> {
   const rows = await tx<WindowRow[]>`
     insert into engagement_windows (
-      name, starts_at, ends_at, budget_shards, bounty_shards, bounty_max_listings, created_by
+      name, starts_at, ends_at, budget_wei, bounty_wei, bounty_max_listings, created_by
     ) values (
-      ${input.name}, ${input.startsAt}, ${input.endsAt}, ${input.budgetShards.toString()},
-      ${input.bountyShards.toString()}, ${input.bountyMaxListings}, ${input.operator}
+      ${input.name}, ${input.startsAt}, ${input.endsAt}, ${input.budgetWei.toString()},
+      ${input.bountyWei.toString()}, ${input.bountyMaxListings}, ${input.operator}
     )
     returning ${tx.unsafe(WINDOW_COLUMNS)}
   `
@@ -155,7 +168,7 @@ export interface EngagementGrant {
   readonly grantKind: GrantKind
   readonly beneficiary: string
   readonly listingId: string | null
-  readonly amountShards: bigint
+  readonly amountWei: bigint
   readonly ledgerEntryId: string
   readonly grantedAt: Date
 }
@@ -166,12 +179,12 @@ interface GrantRow {
   readonly grant_kind: GrantKind
   readonly beneficiary: string
   readonly listing_id: string | null
-  readonly amount_shards: string
+  readonly amount_wei: string
   readonly ledger_entry_id: string
   readonly granted_at: Date
 }
 
-const GRANT_COLUMNS = `id, window_id, grant_kind, beneficiary, listing_id, amount_shards::text,
+const GRANT_COLUMNS = `id, window_id, grant_kind, beneficiary, listing_id, amount_wei::text,
                        ledger_entry_id, granted_at`
 
 function toGrant(row: GrantRow): EngagementGrant {
@@ -181,7 +194,7 @@ function toGrant(row: GrantRow): EngagementGrant {
     grantKind: row.grant_kind,
     beneficiary: row.beneficiary,
     listingId: row.listing_id,
-    amountShards: BigInt(row.amount_shards),
+    amountWei: BigInt(row.amount_wei),
     ledgerEntryId: row.ledger_entry_id,
     grantedAt: row.granted_at,
   }
@@ -203,26 +216,26 @@ export function grantIdempotencyKey(kind: GrantKind, listingId: string): string 
 
 /** The two postings every grant is: out of `engagement:market`, into the beneficiary. */
 export function grantPostings(input: {
-  readonly amountShards: bigint
+  readonly amountWei: bigint
   readonly beneficiary: { readonly subject: string; readonly purpose: 'available' | 'fees'; readonly type: 'liability' | 'revenue' }
 }): readonly PostingRequest[] {
-  const from = engagementAccount('market', SHARD)
+  const from = engagementAccount('market', ENGAGEMENT_ASSET)
   return [
     {
       direction: 'debit',
-      amount: input.amountShards,
-      assetCode: SHARD,
+      amount: input.amountWei,
+      assetCode: ENGAGEMENT_ASSET,
       sequence: 0,
-      account: { subject: from.subject, assetCode: SHARD, purpose: from.purpose, type: from.type },
+      account: { subject: from.subject, assetCode: ENGAGEMENT_ASSET, purpose: from.purpose, type: from.type },
     },
     {
       direction: 'credit',
-      amount: input.amountShards,
-      assetCode: SHARD,
+      amount: input.amountWei,
+      assetCode: ENGAGEMENT_ASSET,
       sequence: 1,
       account: {
         subject: input.beneficiary.subject,
-        assetCode: SHARD,
+        assetCode: ENGAGEMENT_ASSET,
         purpose: input.beneficiary.purpose,
         type: input.beneficiary.type,
       },
@@ -234,7 +247,7 @@ export interface PayGrantInput {
   readonly windowId: string
   readonly grantKind: GrantKind
   readonly listingId: string
-  readonly amountShards: bigint
+  readonly amountWei: bigint
   readonly beneficiary: { readonly subject: string; readonly purpose: 'available' | 'fees'; readonly type: 'liability' | 'revenue' }
   readonly actor: string
   readonly correlationId: string
@@ -251,7 +264,7 @@ export interface PayGrantDeps {
  *
  * **The budget is consumed FIRST, in its own committed transaction**, and that ordering is the
  * whole safety argument. `engagement_windows_within_budget` refuses the UPDATE that would take
- * `spent_shards` past `budget_shards`, so two concurrent grants racing the last of a budget
+ * `spent_wei` past `budget_wei`, so two concurrent grants racing the last of a budget
  * serialise on the row and the loser is refused by the database — not by a handler that read the
  * balance a moment ago. Only then does any money move.
  *
@@ -273,7 +286,7 @@ export async function payGrant(
   // 1. Consume the budget, bounded by the CHECK. Committed before anything moves.
   const claimed = await deps.sql<{ id: string }[]>`
     update engagement_windows
-       set spent_shards = spent_shards + ${input.amountShards.toString()}
+       set spent_wei = spent_wei + ${input.amountWei.toString()}
      where id = ${input.windowId}
     returning id
   `
@@ -290,7 +303,7 @@ export async function payGrant(
       correlationId: input.correlationId,
       idempotencyKey: grantIdempotencyKey(input.grantKind, input.listingId),
       description: input.description,
-      postings: grantPostings({ amountShards: input.amountShards, beneficiary: input.beneficiary }),
+      postings: grantPostings({ amountWei: input.amountWei, beneficiary: input.beneficiary }),
     })
     entryId = entry.id
   } catch (err) {
@@ -298,7 +311,7 @@ export async function payGrant(
     // window that silently loses budget to a ledger outage stops subsidising and nobody knows why.
     await deps.sql`
       update engagement_windows
-         set spent_shards = spent_shards - ${input.amountShards.toString()}
+         set spent_wei = spent_wei - ${input.amountWei.toString()}
        where id = ${input.windowId}
     `
     throw err
@@ -307,10 +320,10 @@ export async function payGrant(
   // 3. The row, which cannot be written without the entry id — 21 §7.4.
   const rows = await deps.sql<GrantRow[]>`
     insert into engagement_grants (
-      window_id, grant_kind, beneficiary, listing_id, amount_shards, ledger_entry_id, correlation_id
+      window_id, grant_kind, beneficiary, listing_id, amount_wei, ledger_entry_id, correlation_id
     ) values (
       ${input.windowId}, ${input.grantKind}, ${input.beneficiary.subject}, ${input.listingId},
-      ${input.amountShards.toString()}, ${entryId}, ${input.correlationId}
+      ${input.amountWei.toString()}, ${entryId}, ${input.correlationId}
     )
     on conflict do nothing
     returning ${deps.sql.unsafe(GRANT_COLUMNS)}
@@ -321,7 +334,7 @@ export async function payGrant(
     // the money is right; this attempt's budget consumption is the surplus and is returned.
     await deps.sql`
       update engagement_windows
-         set spent_shards = spent_shards - ${input.amountShards.toString()}
+         set spent_wei = spent_wei - ${input.amountWei.toString()}
        where id = ${input.windowId}
     `
     return null
@@ -382,6 +395,25 @@ export async function bountiesPaid(sql: Db | Tx, windowId: string): Promise<numb
  *
  * The forgone amount is floor(price × waivedBps / 10 000) — `money.ts`'s rounding, in the same
  * direction, so the subsidy can never exceed the fee that would have been charged.
+ *
+ * ── THE LISTING'S ASSET MUST BE THE PROGRAMME'S ASSET, AND IT IS CHECKED HERE ────────────────
+ *
+ * `forgone` is a fraction of the LISTING's price, so it is denominated in whatever that listing
+ * is priced in — `listings.asset_code`, which is any `LedgerAssetCode`. Until 2026-08-10 this
+ * function posted that figure as SHARD whatever the listing was priced in, which was wrong twice
+ * over: the amount was a number of one asset's units labelled as another's, and the credit landed
+ * in `(platform, SHARD, fees)` rather than in the fee line the waived fee would have reached,
+ * which is keyed by the listing's own asset. Live listings on mainnet 2026-08-10: eight, three
+ * priced in EMBER and five in SHARD, all `draft`; zero windows and zero grants, so nothing has
+ * ever taken this path.
+ *
+ * Refused rather than converted. A budget denominated in EMBER wei cannot fund a fee forgone in
+ * litoshi without a rate, and the estate's one administered rate is an operator-editable row —
+ * so a silent conversion here would make the programme's spend figure depend on when it was
+ * read. The failure is the caller's ordinary swallowed one: the sale stands, the seller still
+ * pays nothing, and the absent grant row records that the platform rather than the programme
+ * bore that fee. That is the same trade this function's header already makes for a ledger
+ * outage, and it is visible in the warning the caller logs.
  */
 export async function paySettlementSubsidy(
   deps: PayGrantDeps,
@@ -390,10 +422,18 @@ export async function paySettlementSubsidy(
     readonly windowId: string | null
     readonly waivedFeeBps: number | null
     readonly price: bigint
+    readonly assetCode: string
     readonly correlationId: string
   },
 ): Promise<EngagementGrant | null> {
   if (!input.windowId || !input.waivedFeeBps) return null
+  if (input.assetCode !== ENGAGEMENT_ASSET) {
+    throw new EngagementError(
+      'subsidy_asset_mismatch',
+      `listing ${input.listingId} is priced in ${input.assetCode}, and the engagement programme ` +
+        `is denominated in ${ENGAGEMENT_ASSET} — the waived fee cannot be funded from it`,
+    )
+  }
   const forgone = (input.price * BigInt(input.waivedFeeBps)) / 10_000n
   if (forgone <= 0n) return null
 
@@ -401,7 +441,7 @@ export async function paySettlementSubsidy(
     windowId: input.windowId,
     grantKind: 'listing_fee_subsidy',
     listingId: input.listingId,
-    amountShards: forgone,
+    amountWei: forgone,
     // The platform's OWN fee line: the seller's benefit is the fee they did not pay, so the
     // money moves from the programme to the revenue line the fee would have reached.
     beneficiary: { subject: 'platform', purpose: 'fees', type: 'revenue' },

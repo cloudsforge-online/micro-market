@@ -60,8 +60,8 @@ describe('the engagement programme', { skip }, () => {
         name: 'launch week',
         startsAt: new Date(Date.now() - HOUR),
         endsAt: new Date(Date.now() + HOUR),
-        budgetShards: 10_000n,
-        bountyShards: 100n,
+        budgetWei: 10_000n,
+        bountyWei: 100n,
         bountyMaxListings: 3,
         operator: 'user:op',
         ...overrides,
@@ -77,7 +77,7 @@ describe('the engagement programme', { skip }, () => {
     const listing = await seedListing(h)
     await assert.rejects(
       sql`
-        insert into engagement_grants (window_id, grant_kind, beneficiary, listing_id, amount_shards)
+        insert into engagement_grants (window_id, grant_kind, beneficiary, listing_id, amount_wei)
         values (${w.id}, 'first_listing_bounty', ${SELLER}, ${listing.id}, 100)
       `,
       /ledger_entry_id/,
@@ -92,7 +92,7 @@ describe('the engagement programme', { skip }, () => {
       await assert.rejects(
         sql`
           insert into engagement_grants (
-            window_id, grant_kind, beneficiary, listing_id, amount_shards, ledger_entry_id
+            window_id, grant_kind, beneficiary, listing_id, amount_wei, ledger_entry_id
           ) values (${w.id}, 'first_listing_bounty', ${beneficiary}, ${listing.id}, 100, 'e1')
         `,
         /beneficiary_is_not_the_programme/,
@@ -105,7 +105,7 @@ describe('the engagement programme', { skip }, () => {
     const listing = await seedListing(h)
     const insert = () => sql`
       insert into engagement_grants (
-        window_id, grant_kind, beneficiary, listing_id, amount_shards, ledger_entry_id
+        window_id, grant_kind, beneficiary, listing_id, amount_wei, ledger_entry_id
       ) values (${w.id}, 'first_listing_bounty', ${SELLER}, ${listing.id}, 100, 'e1')
     `
     await insert()
@@ -151,10 +151,10 @@ describe('the engagement programme', { skip }, () => {
   /* ══════════════════════════════════════════════ windows are bounded */
 
   test('FIRE TEST: a window cannot overspend its budget, and two windows cannot overlap', async () => {
-    const w = await window({ budgetShards: 150n })
-    await sql`update engagement_windows set spent_shards = 150 where id = ${w.id}`
+    const w = await window({ budgetWei: 150n })
+    await sql`update engagement_windows set spent_wei = 150 where id = ${w.id}`
     await assert.rejects(
-      sql`update engagement_windows set spent_shards = 151 where id = ${w.id}`,
+      sql`update engagement_windows set spent_wei = 151 where id = ${w.id}`,
       /engagement_windows_within_budget/,
       'a budget that can be overspent is not a budget',
     )
@@ -167,7 +167,7 @@ describe('the engagement programme', { skip }, () => {
 
   test('a bounty with no listing cap, or a cap with no bounty, is not a policy', async () => {
     await assert.rejects(
-      window({ bountyShards: 100n, bountyMaxListings: 0 }),
+      window({ bountyWei: 100n, bountyMaxListings: 0 }),
       /engagement_windows_bounty_pair/,
     )
   })
@@ -183,7 +183,7 @@ describe('the engagement programme', { skip }, () => {
         windowId: w.id,
         grantKind: 'first_listing_bounty',
         listingId: listing.id,
-        amountShards: 100n,
+        amountWei: 100n,
         beneficiary: { subject: SELLER, purpose: 'available', type: 'liability' },
         actor: 'service:market',
         correlationId: 'r1',
@@ -191,7 +191,7 @@ describe('the engagement programme', { skip }, () => {
       },
     )
     assert.ok(grant)
-    assert.equal(grant.amountShards, 100n)
+    assert.equal(grant.amountWei, 100n)
     assert.ok(grant.ledgerEntryId, 'the grant names the entry that paid it')
 
     // treasury_spend, debit engagement:market → credit the seller. The kind matters: the ledger's
@@ -209,7 +209,7 @@ describe('the engagement programme', { skip }, () => {
 
     // The budget was consumed by exactly the amount granted.
     const after = await activeWindow(h.sql, new Date())
-    assert.equal(after?.spentShards, 100n)
+    assert.equal(after?.spentWei, 100n)
     assert.equal(await bountiesPaid(h.sql, w.id), 1)
   })
 
@@ -220,7 +220,7 @@ describe('the engagement programme', { skip }, () => {
       windowId: w.id,
       grantKind: 'first_listing_bounty' as const,
       listingId: listing.id,
-      amountShards: 100n,
+      amountWei: 100n,
       beneficiary: { subject: SELLER, purpose: 'available' as const, type: 'liability' as const },
       actor: 'service:market',
       correlationId: 'r1',
@@ -233,7 +233,7 @@ describe('the engagement programme', { skip }, () => {
     const grants = await listGrants(h.sql)
     assert.equal(grants.length, 1)
     // And the budget was consumed once, not twice.
-    assert.equal((await activeWindow(h.sql, new Date()))?.spentShards, 100n)
+    assert.equal((await activeWindow(h.sql, new Date()))?.spentWei, 100n)
   })
 
   test('a ledger refusal returns the budget rather than silently consuming it', async () => {
@@ -247,7 +247,7 @@ describe('the engagement programme', { skip }, () => {
           windowId: w.id,
           grantKind: 'first_listing_bounty',
           listingId: listing.id,
-          amountShards: 100n,
+          amountWei: 100n,
           beneficiary: { subject: SELLER, purpose: 'available', type: 'liability' },
           actor: 'service:market',
           correlationId: 'r1',
@@ -256,7 +256,7 @@ describe('the engagement programme', { skip }, () => {
       ),
     )
     // A window that silently loses budget to an outage stops subsidising and nobody knows why.
-    assert.equal((await activeWindow(h.sql, new Date()))?.spentShards, 0n)
+    assert.equal((await activeWindow(h.sql, new Date()))?.spentWei, 0n)
     assert.equal(await findGrant(h.sql, 'first_listing_bounty', listing.id), null)
   })
 
@@ -264,7 +264,7 @@ describe('the engagement programme', { skip }, () => {
 
   test('a waived fee is FUNDED out of engagement:market, not merely forgone', async () => {
     const w = await window()
-    const listing = await seedListing(h)
+    const listing = await seedListing(h, { assetCode: 'EMBER' })
     // 250 bps of 1,000 = 25, floor — money.ts's rounding, in the same direction, so the subsidy
     // can never exceed the fee that would have been charged.
     const grant = await paySettlementSubsidy(
@@ -274,11 +274,12 @@ describe('the engagement programme', { skip }, () => {
         windowId: w.id,
         waivedFeeBps: 250,
         price: 1_000n,
+        assetCode: listing.assetCode,
         correlationId: 'r1',
       },
     )
     assert.ok(grant)
-    assert.equal(grant.amountShards, 25n)
+    assert.equal(grant.amountWei, 25n)
     const posted = h.ledger.entries.at(-1)!
     assert.deepEqual(
       posted.postings.map((p) => [p.direction, p.account.subject, p.account.purpose]),
@@ -289,13 +290,60 @@ describe('the engagement programme', { skip }, () => {
         ['credit', 'platform', 'fees'],
       ],
     )
+    // micro-org#226. Both legs, and both ACCOUNTS: the ledger keys an account on
+    // (subject, asset_code, purpose), so a posting in EMBER against an account spelled SHARD
+    // would be a second treasury rather than a mislabelled one. SHARD appears nowhere.
+    assert.deepEqual(
+      posted.postings.map((p) => [p.assetCode, p.account.assetCode]),
+      [
+        ['EMBER', 'EMBER'],
+        ['EMBER', 'EMBER'],
+      ],
+    )
+  })
+
+  test('a subsidy is REFUSED when the listing is priced in another asset', async () => {
+    const w = await window()
+    // The default seed is a SHARD-priced listing, which is still a legal listing.
+    const listing = await seedListing(h)
+    // Not zero: seeding a listing reserves its escrow, which is itself a ledger entry. What must
+    // not move is anything AFTER that.
+    const before = h.ledger.entries.length
+    await assert.rejects(
+      paySettlementSubsidy(
+        { sql: h.sql, ledger: h.ledger },
+        {
+          listingId: listing.id,
+          windowId: w.id,
+          waivedFeeBps: 250,
+          price: 1_000n,
+          assetCode: listing.assetCode,
+          correlationId: 'r1',
+        },
+      ),
+      /subsidy_asset_mismatch|denominated in EMBER/,
+      'a fee forgone in one asset cannot be funded from a budget in another without a rate',
+    )
+    // Nothing moved and no budget was consumed: the sale stands, and the absent grant row is
+    // what records that the platform rather than the programme bore that fee.
+    assert.equal(h.ledger.entries.length, before)
+    assert.equal((await listGrants(h.sql)).length, 0)
+    assert.equal((await activeWindow(h.sql, new Date()))?.spentWei, 0n)
+    assert.ok(w.id)
   })
 
   test('an unwaived listing subsidises nothing', async () => {
     const listing = await seedListing(h)
     const grant = await paySettlementSubsidy(
       { sql: h.sql, ledger: h.ledger },
-      { listingId: listing.id, windowId: null, waivedFeeBps: null, price: 1_000n, correlationId: 'r' },
+      {
+        listingId: listing.id,
+        windowId: null,
+        waivedFeeBps: null,
+        price: 1_000n,
+        assetCode: listing.assetCode,
+        correlationId: 'r',
+      },
     )
     assert.equal(grant, null)
     assert.equal((await listGrants(h.sql)).length, 0)

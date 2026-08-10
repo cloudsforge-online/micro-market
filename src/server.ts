@@ -1490,7 +1490,7 @@ async function payListingBounty(
   const windowId = listing.engagementWindowId
   if (!windowId) return null
   const window = (await listWindows(deps.sql, 50)).find((w) => w.id === windowId)
-  if (!window || window.bountyShards <= 0n) return null
+  if (!window || window.bountyWei <= 0n) return null
   if ((await bountiesPaid(deps.sql, windowId)) >= window.bountyMaxListings) return null
 
   return payGrant(
@@ -1499,7 +1499,7 @@ async function payListingBounty(
       windowId,
       grantKind: 'first_listing_bounty',
       listingId: listing.id,
-      amountShards: window.bountyShards,
+      amountWei: window.bountyWei,
       // The SELLER. Never a buyer and never a bid — 21 §5's "never ghost demand", which the
       // schema also refuses at `bids_never_platform_funded`.
       beneficiary: { subject: listing.sellerSubject, purpose: 'available', type: 'liability' },
@@ -1532,6 +1532,7 @@ async function subsidiseIfWaived(
       windowId: listing.engagementWindowId,
       waivedFeeBps: listing.engagementWaivedFeeBps,
       price,
+      assetCode: listing.assetCode,
       correlationId,
     },
   ).catch((err: unknown) => {
@@ -1549,9 +1550,10 @@ function grantWire(grant: EngagementGrant): Record<string, unknown> {
     kind: grant.grantKind,
     beneficiary: grant.beneficiary,
     listingId: grant.listingId,
-    // A decimal string. A Shard amount fits a double today and an amount that silently loses its
-    // low bits in transit is worse than one that fails to serialise.
-    amountShards: grant.amountShards.toString(),
+    // A decimal string, and since migration 14 (micro-org#226) that is load-bearing rather than
+    // careful: the amount is EMBER wei, so one EMBER is 1e18 and a JSON number is an IEEE 754
+    // double with 53 bits of mantissa. It stopped being a Shard figure that happened to fit.
+    amountWei: grant.amountWei.toString(),
     ledgerEntryId: grant.ledgerEntryId,
     grantedAt: grant.grantedAt.toISOString(),
   }
@@ -1563,10 +1565,10 @@ function windowWire(window: EngagementWindow): Record<string, unknown> {
     name: window.name,
     startsAt: window.startsAt.toISOString(),
     endsAt: window.endsAt.toISOString(),
-    budgetShards: window.budgetShards.toString(),
-    spentShards: window.spentShards.toString(),
-    remainingShards: (window.budgetShards - window.spentShards).toString(),
-    bountyShards: window.bountyShards.toString(),
+    budgetWei: window.budgetWei.toString(),
+    spentWei: window.spentWei.toString(),
+    remainingWei: (window.budgetWei - window.spentWei).toString(),
+    bountyWei: window.bountyWei.toString(),
     bountyMaxListings: window.bountyMaxListings,
     createdBy: window.createdBy,
     createdAt: window.createdAt.toISOString(),
