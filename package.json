@@ -1,6 +1,6 @@
 {
   "name": "@cloudsforge/market",
-  "version": "2026.08.31",
+  "version": "2026.08.32",
   "private": true,
   "description": "Forge Market. Listings whose existence requires a ledger reservation, dual-mode settlement per AD-14, orders that cannot exist without a settlement artefact, auctions, offers, computed risk indicators, moderation and reversible disputes.",
   "license": "MIT",
