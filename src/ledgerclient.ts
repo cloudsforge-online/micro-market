@@ -30,7 +30,13 @@
  */
 
 import { HttpClient, HttpError } from '@cloudsforge/http'
-import type { Actor, EntryKind, LedgerAssetCode } from '@cloudsforge/contracts-money'
+import type {
+  AccountPurpose,
+  AccountType,
+  Actor,
+  EntryKind,
+  LedgerAssetCode,
+} from '@cloudsforge/contracts-money'
 import type { SaleSplit } from './money.ts'
 import type { LiveScope } from '@cloudsforge/contracts-auth'
 
@@ -70,16 +76,21 @@ export class LedgerUnavailableError extends Error {
   }
 }
 
-export type AccountPurpose =
-  | 'available'
-  | 'reserved'
-  | 'escrow'
-  | 'treasury'
-  | 'fees'
-  | 'payout_due'
-  | 'suspense'
-
-export type AccountType = 'liability' | 'asset' | 'revenue' | 'expense' | 'equity' | 'clearing'
+/**
+ * Re-exported from contracts rather than restated here.
+ *
+ * These two were a hand-kept copy of the contracts unions, identical on the day they were written
+ * and silently divergent afterwards. When micro-org#495 added the `inventory` purpose for the
+ * exchange desk, the copy did not gain it, and `engagement.ts` — which builds its account ref from
+ * `engagementAccount()` in contracts — stopped typechecking against a local union that no longer
+ * described the same set. The failure surfaced at the release build for the whole estate, in a
+ * service that has nothing to do with the desk.
+ *
+ * A duplicated union does not warn when it falls behind; it just narrows. Sourcing them means the
+ * next member added in contracts arrives here too, and a member this service genuinely cannot
+ * handle becomes a visible switch-exhaustiveness error instead of an assignability one.
+ */
+export type { AccountPurpose, AccountType }
 
 export interface AccountRef {
   readonly subject: string
