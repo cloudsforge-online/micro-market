@@ -502,9 +502,17 @@ export function createServer(deps: ServerDeps): Server {
     // past a `.catch` that is not attached yet, and the listener returns having sent NOTHING. The
     // connection then hangs until the client gives up: the one path the design most depends on
     // being loud was the one path that was silent.
+    // `forRequest` is resolved HERE, not on the dispatch line, and that placement is the whole
+    // point. It rebuilds this request's domain objects, and in the services that bulkhead their
+    // job queues it reaches a per-network plane that throws just as hard as the handle does.
+    // One line lower it was OUTSIDE this try and still synchronous — so the throw was an
+    // unhandled exception in a request listener, and node exits on those. The pod died on the
+    // first request naming a network it did not hold, and its replacement died on the next one.
     let sql: Db
+    let scoped: ReturnType<typeof forRequest>
     try {
       sql = deps.sql.for(network) as unknown as Db
+      scoped = forRequest(deps, sql)
     } catch (err) {
       log.error('no usable database handle for this request', { err, network })
       send(
@@ -515,7 +523,7 @@ export function createServer(deps: ServerDeps): Server {
       finish(500, network)
       return
     }
-    void handle(matched, { req, url, requestId, log, params, network, sql }, forRequest(deps, sql))
+    void handle(matched, { req, url, requestId, log, params, network, sql }, scoped)
       .then((reply) => {
         send(res, reply, requestId)
         finish(reply.status, network)
