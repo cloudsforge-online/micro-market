@@ -59,6 +59,8 @@ import {
 } from '@cloudsforge/auth'
 import type { LedgerAssetCode } from '@cloudsforge/contracts-money'
 import type { Lifecycle } from '@cloudsforge/lifecycle'
+import { NetworkUnknownError, requestNetwork, type Network } from '@cloudsforge/http'
+import type { NetworkSql } from '@cloudsforge/db'
 import { Metrics, newRequestId, type Logger } from '@cloudsforge/telemetry'
 import type { JobQueue } from '@cloudsforge/jobs'
 import { SIGNATURE_HEADER, signEvent, withInbox, type Db } from './outbox.ts'
@@ -174,7 +176,16 @@ export interface ServerDeps {
   readonly logger: Logger
   readonly metrics: Metrics
   readonly verifier: PrincipalVerifier
-  readonly sql: Db
+  /**
+   * The per-network SELECTOR, not a handle. Routes use `ctx.sql`; `NetworkSql` has no query
+   * methods, so reaching for the process-wide handle does not compile.
+   */
+  readonly sql: NetworkSql
+  /**
+   * The network to assume when no `CF-Network` arrives, or `undefined` to refuse. `CF_NETWORK_SINGLE`,
+   * for `pnpm dev`, which has no gateway in front of it. Never set in production.
+   */
+  readonly singleNetwork?: Network
   readonly producer: string
   readonly listings: ActivateDeps & EndListingDeps
   /**
@@ -340,7 +351,34 @@ interface RequestContext {
   readonly requestId: string
   readonly log: Logger
   readonly params: Readonly<Record<string, string>>
+  /**
+   * The network THIS REQUEST belongs to, from the `CF-Network` header the gateway stamped.
+   *
+   * Not a property of the process: one pod serves both estates since the network consolidation
+   * (micro-deploy `docs/network-consolidation.md`), so "which network am I" has no answer.
+   */
+  readonly network: Network
+  /**
+   * The database handle for `network`, resolved ONCE, at the edge of the request.
+   *
+   * Every route uses this rather than reaching for the process-wide handle, because a wrong handle
+   * is not an error — it is a query that SUCCEEDS against the other estate's rows and says nothing.
+   * `deps.sql` is a `NetworkSql` with no query methods, so the mistake does not compile.
+   */
+  readonly sql: Db
 }
+
+/**
+ * Routes that answer without belonging to a network.
+ *
+ * Kubelet probes the first two and Prometheus scrapes the third; none arrives through the gateway,
+ * so none carries `CF-Network`. Refusing them turns a data-isolation rule into a CrashLoopBackOff —
+ * which is exactly what agora's first build did: 500 on every probe, container never ready.
+ *
+ * A literal SET rather than a prefix, because this is an exemption from a data boundary and
+ * widening it should be a deliberate edit. Every member must answer without touching the database.
+ */
+const OPERATIONAL_ROUTES: ReadonlySet<string> = new Set(['/livez', '/readyz', '/metrics'])
 
 interface Route {
   readonly method: string
@@ -412,7 +450,7 @@ export function createServer(deps: ServerDeps): Server {
     inFlight += 1
     deps.metrics.set('http_requests_in_flight', inFlight)
 
-    const finish = (status: number) => {
+    const finish = (status: number, metricNetwork: string) => {
       inFlight -= 1
       deps.metrics.set('http_requests_in_flight', inFlight)
       const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6
@@ -421,18 +459,49 @@ export function createServer(deps: ServerDeps): Server {
         route: routeLabel,
         status: String(status),
       })
-      deps.metrics.observe('http_request_duration_ms', durationMs, { method, route: routeLabel })
+      deps.metrics.observe('http_request_duration_ms', durationMs, {
+        method,
+        route: routeLabel,
+        network: metricNetwork,
+      })
     }
 
-    void handle(matched, { req, url, requestId, log, params }, deps)
+    // ── THE NETWORK, THEN THE HANDLE, BEFORE ANY ROUTE RUNS ──────────────────────────────────
+    //
+    // `requestNetwork` REFUSES an unstamped request rather than assuming mainnet: a 500 is a
+    // routing fault made loud, where a default is a cross-network write nothing would ever flag.
+    //
+    // The operational endpoints are exempt because kubelet and Prometheus do not come through the
+    // gateway and never send the header. Refusing them makes the pod never become ready.
+    const networkless = matched !== undefined && OPERATIONAL_ROUTES.has(matched.path)
+    let network: Network
+    try {
+      network = networkless
+        ? (deps.singleNetwork ?? deps.sql.networks[0] ?? 'mainnet')
+        : requestNetwork(req.headers, deps.singleNetwork ? { fallback: deps.singleNetwork } : {})
+    } catch (err) {
+      log.error('request carries no usable network', {
+        err: err instanceof NetworkUnknownError ? err.message : err,
+      })
+      send(
+        res,
+        errorReply(500, 'network_unknown', 'this request could not be attributed to a network', requestId),
+        requestId,
+      )
+      finish(500, 'unknown')
+      return
+    }
+
+    const sql = deps.sql.for(network) as unknown as Db
+    void handle(matched, { req, url, requestId, log, params, network, sql }, forRequest(deps, sql))
       .then((reply) => {
         send(res, reply, requestId)
-        finish(reply.status)
+        finish(reply.status, network)
       })
       .catch((err: unknown) => {
         log.error('request handler threw after mapping', { err })
         send(res, errorReply(500, 'internal', 'the request could not be completed', requestId), requestId)
-        finish(500)
+        finish(500, network)
       })
   })
 }
@@ -450,6 +519,23 @@ export function createServer(deps: ServerDeps): Server {
  *     listing already sold, an idempotency key reused with a different body.
  *   * **503** — an upstream is unreachable, or an idempotent request is still in flight.
  */
+/**
+ * The deps a REQUEST sees: every domain bundle rebuilt against this request's network.
+ *
+ * Cheap — these are plain immutable records over a pool reference, not connections. The one that
+ * would bite if it were missed is `orders`: a purchase written through the other estate's handle
+ * succeeds, posts to the other estate's ledger, and leaves matching rows on both sides.
+ */
+function forRequest(deps: ServerDeps, sql: Db): ServerDeps {
+  return {
+    ...deps,
+    listings: { ...deps.listings, sql },
+    orders: { ...deps.orders, sql },
+    bids: { ...deps.bids, sql },
+    moderation: { ...deps.moderation, sql },
+  }
+}
+
 async function handle(route: Route | undefined, ctx: RequestContext, deps: ServerDeps): Promise<Reply> {
   if (!route) {
     return errorReply(404, 'not_found', `no route for ${ctx.req.method} ${ctx.url.pathname}`, ctx.requestId)
@@ -633,7 +719,7 @@ function buildRoutes(): Route[] {
         // Withdrawing a listing releases escrows, which is a network call per escrow; doing that
         // inside the webhook would couple billing's relay timeout to how many bids a seller has,
         // and a slow withdrawal would make the relay redeliver an event we have already acted on.
-        const outcome = await withInbox(deps.sql, topic, eventId, async (tx) => {
+        const outcome = await withInbox(ctx.sql, topic, eventId, async (tx) => {
           const rows = await tx<{ id: string }[]>`
             update listings set expires_at = now(), updated_at = now()
              where seller_subject = ${subject} and status in ('draft','active')
@@ -664,7 +750,7 @@ function buildRoutes(): Route[] {
 
     define('GET', '/v1/collections', async (ctx, deps) => {
       const owner = ctx.url.searchParams.get('ownerSubject') ?? undefined
-      const collections = await listCollections(deps.sql, owner)
+      const collections = await listCollections(ctx.sql, owner)
       return { status: 200, body: { collections } }
     }),
 
@@ -672,7 +758,7 @@ function buildRoutes(): Route[] {
       const principal = await authenticate(ctx, deps)
       if (principal.kind === 'service') requireScope(principal, WRITE_SCOPE)
       const body = await readJson(ctx.req)
-      const collection = await createCollection(deps.sql, {
+      const collection = await createCollection(ctx.sql, {
         ownerSubject: subjectOf(principal),
         slug: requireString(body, 'slug'),
         name: requireString(body, 'name'),
@@ -687,7 +773,7 @@ function buildRoutes(): Route[] {
     define('GET', '/v1/listings', async (ctx, deps) => {
       const status = ctx.url.searchParams.get('status')
       const assetKind = ctx.url.searchParams.get('assetKind')
-      const listings = await listListings(deps.sql, {
+      const listings = await listListings(ctx.sql, {
         // Defaults to `active`. A browse endpoint that defaulted to everything would show drafts
         // and cancellations to buyers, which is both confusing and a leak of what sellers tried.
         status: (status ?? 'active') as ListingStatus,
@@ -702,7 +788,7 @@ function buildRoutes(): Route[] {
       // ONE query for the whole page's galleries, not one per listing. Fifty listings would
       // otherwise be fifty-one round trips on the busiest read this service serves.
       const galleries = await listingImagesFor(
-        deps.sql,
+        ctx.sql,
         listings.map((listing) => listing.id),
       )
       return {
@@ -719,13 +805,13 @@ function buildRoutes(): Route[] {
     }),
 
     define('GET', '/v1/listings/:id', async (ctx, deps) => {
-      const listing = await findListing(deps.sql, itemIdOf(ctx))
+      const listing = await findListing(ctx.sql, itemIdOf(ctx))
       if (!listing) throw new NotFoundError('no such listing')
       return {
         status: 200,
         body: {
           listing: listingWire(listing),
-          royalties: (await listingRoyalties(deps.sql, listing.id)).map((share) => ({
+          royalties: (await listingRoyalties(ctx.sql, listing.id)).map((share) => ({
             subject: share.subject,
             bps: share.bps,
           })),
@@ -733,7 +819,7 @@ function buildRoutes(): Route[] {
           // make a second request for its photographs would render text first and pictures a round
           // trip later, and a client that forgot the second call would show a marketplace with no
           // images at all and no error to explain it.
-          images: (await listingImages(deps.sql, listing.id)).map((image) =>
+          images: (await listingImages(ctx.sql, listing.id)).map((image) =>
             imageWire(image, deps.studioPublicUrl),
           ),
         },
@@ -776,11 +862,11 @@ function buildRoutes(): Route[] {
       //    the listing remembers the window and the rate so the subsidy can be FUNDED out of
       //    `engagement:market` at settlement rather than merely forgone. At most one window can
       //    be live (`engagement_windows_no_overlap`), so this is one row or none.
-      const window = await activeWindow(deps.sql, deps.now ? deps.now() : new Date())
+      const window = await activeWindow(ctx.sql, deps.now ? deps.now() : new Date())
       const waived = window !== null && deps.platformFeeBps > 0
 
       return withIdempotentRoute(ctx, deps, principal, '/v1/listings', body, async (storedKey) => {
-        const listing = await createListing(deps.sql, deps.producer, {
+        const listing = await createListing(ctx.sql, deps.producer, {
           // Stored on the listing itself. The claim row in `idempotency_keys` commits in a
           // DIFFERENT transaction from this insert, so it can be rolled back while the listing
           // survives; `listings_idempotency_uniq` is what makes the retry that follows find this
@@ -852,7 +938,7 @@ function buildRoutes(): Route[] {
       const listingId = itemIdOf(ctx)
       const body = await readJson(ctx.req)
 
-      const draft = await findListing(deps.sql, listingId)
+      const draft = await findListing(ctx.sql, listingId)
       if (!draft || draft.sellerSubject !== subjectOf(principal)) {
         throw new NotFoundError('no such listing')
       }
@@ -892,7 +978,7 @@ function buildRoutes(): Route[] {
       //    for an intention. Best-effort by design: a bounty that cannot be paid must never stop
       //    a seller listing, and the failure is recorded rather than raised. The grant's natural
       //    key and its ledger idempotency key are both the LISTING, so a retry pays once.
-      const bounty = await payListingBounty(deps, listing, ctx.requestId).catch((err: unknown) => {
+      const bounty = await payListingBounty(ctx.sql, deps, listing, ctx.requestId).catch((err: unknown) => {
         ctx.log.warn('a listing bounty could not be paid; the listing is unaffected', {
           listingId: listing.id,
           err,
@@ -920,9 +1006,9 @@ function buildRoutes(): Route[] {
 
     /** Computed risk indicators. Fails OPEN: a listing without indicators beats no listing. */
     define('GET', '/v1/listings/:id/risk', async (ctx, deps) => {
-      const listing = await findListing(deps.sql, itemIdOf(ctx))
+      const listing = await findListing(ctx.sql, itemIdOf(ctx))
       if (!listing) throw new NotFoundError('no such listing')
-      const verification = await findVerification(deps.sql, listing.itemUrn)
+      const verification = await findVerification(ctx.sql, listing.itemUrn)
       try {
         const facts = await deps.indexer.tokenFacts(listing.itemUrn)
         return {
@@ -1002,10 +1088,10 @@ function buildRoutes(): Route[] {
       if (principal.kind === 'service') requireScope(principal, WRITE_SCOPE)
       const listingId = itemIdOf(ctx)
       const body = await readJson(ctx.req)
-      await requireSeller(deps, listingId, principal)
+      await requireSeller(ctx.sql, listingId, principal)
 
       return withIdempotentRoute(ctx, deps, principal, '/v1/listings/:id/images', { listingId, ...body }, async () => {
-        const result = await attachListingImage(imageDeps(deps), {
+        const result = await attachListingImage(imageDeps(ctx.sql, deps), {
           listingId,
           sellerSubject: subjectOf(principal),
           studioAssetId: requireString(body, 'studioAssetId'),
@@ -1037,9 +1123,9 @@ function buildRoutes(): Route[] {
       const principal = await authenticate(ctx, deps)
       if (principal.kind === 'service') requireScope(principal, WRITE_SCOPE)
       const listingId = itemIdOf(ctx)
-      await requireSeller(deps, listingId, principal)
+      await requireSeller(ctx.sql, listingId, principal)
 
-      const result = await detachListingImage(imageDeps(deps), {
+      const result = await detachListingImage(imageDeps(ctx.sql, deps), {
         listingId,
         sellerSubject: subjectOf(principal),
         studioAssetId: uuidParam(ctx, 'assetId'),
@@ -1070,9 +1156,9 @@ function buildRoutes(): Route[] {
       if (principal.kind === 'service') requireScope(principal, WRITE_SCOPE)
       const listingId = itemIdOf(ctx)
       const body = await readJson(ctx.req)
-      await requireSeller(deps, listingId, principal)
+      await requireSeller(ctx.sql, listingId, principal)
 
-      const images = await setListingGallery(imageDeps(deps), {
+      const images = await setListingGallery(imageDeps(ctx.sql, deps), {
         listingId,
         sellerSubject: subjectOf(principal),
         images: readGallery(body['images']),
@@ -1109,7 +1195,7 @@ function buildRoutes(): Route[] {
             settlement_mode: result.order.settlementMode,
           })
           // 21 §5: the waived fee is funded out of engagement:market AFTER the sale commits.
-          await subsidiseIfWaived(deps, result.listing, result.order.amount, ctx.requestId, ctx.log)
+          await subsidiseIfWaived(ctx.sql, deps, result.listing, result.order.amount, ctx.requestId, ctx.log)
         }
         return {
           response: { order: orderWire(result.order), replayed: result.replayed },
@@ -1119,7 +1205,7 @@ function buildRoutes(): Route[] {
     }),
 
     define('GET', '/v1/listings/:id/bids', async (ctx, deps) => {
-      const bids = await listBids(deps.sql, itemIdOf(ctx))
+      const bids = await listBids(ctx.sql, itemIdOf(ctx))
       return {
         status: 200,
         body: {
@@ -1166,7 +1252,7 @@ function buildRoutes(): Route[] {
     }),
 
     define('GET', '/v1/listings/:id/offers', async (ctx, deps) => {
-      const offers = await listOffers(deps.sql, itemIdOf(ctx))
+      const offers = await listOffers(ctx.sql, itemIdOf(ctx))
       return { status: 200, body: { offers: offers.map(offerWire) } }
     }),
 
@@ -1207,9 +1293,9 @@ function buildRoutes(): Route[] {
       const principal = await authenticate(ctx, deps)
       if (principal.kind === 'service') requireScope(principal, WRITE_SCOPE)
       const offerId = itemIdOf(ctx)
-      const offer = await findOffer(deps.sql, offerId)
+      const offer = await findOffer(ctx.sql, offerId)
       if (!offer) throw new NotFoundError('no such offer')
-      const listing = await findListing(deps.sql, offer.listingId)
+      const listing = await findListing(ctx.sql, offer.listingId)
       if (!listing || listing.sellerSubject !== subjectOf(principal)) {
         throw new NotFoundError('no such offer')
       }
@@ -1232,7 +1318,7 @@ function buildRoutes(): Route[] {
             settlement_mode: result.order.settlementMode,
           })
           // 21 §5: the waived fee is funded out of engagement:market AFTER the sale commits.
-          await subsidiseIfWaived(deps, result.listing, result.order.amount, ctx.requestId, ctx.log)
+          await subsidiseIfWaived(ctx.sql, deps, result.listing, result.order.amount, ctx.requestId, ctx.log)
         }
         return {
           response: { order: orderWire(result.order), replayed: result.replayed },
@@ -1248,7 +1334,7 @@ function buildRoutes(): Route[] {
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
       const subject = subjectOf(principal)
       const role = ctx.url.searchParams.get('role') === 'seller' ? 'seller' : 'buyer'
-      const orders = await listOrders(deps.sql, {
+      const orders = await listOrders(ctx.sql, {
         ...(role === 'seller' ? { sellerSubject: subject } : { buyerSubject: subject }),
       })
       return { status: 200, body: { orders: orders.map(orderWire) } }
@@ -1257,7 +1343,7 @@ function buildRoutes(): Route[] {
     define('GET', '/v1/orders/:id', async (ctx, deps) => {
       const principal = await authenticate(ctx, deps)
       if (principal.kind === 'service') requireScope(principal, READ_SCOPE)
-      const order = await findOrder(deps.sql, itemIdOf(ctx))
+      const order = await findOrder(ctx.sql, itemIdOf(ctx))
       if (!order) throw new NotFoundError('no such order')
       const subject = subjectOf(principal)
       // "Does not exist" and "is not yours" are the same answer on purpose.
@@ -1293,7 +1379,7 @@ function buildRoutes(): Route[] {
       const principal = await authenticate(ctx, deps)
       requireOperator(principal)
       const state = ctx.url.searchParams.get('state')
-      const disputes = await listDisputes(deps.sql, {
+      const disputes = await listDisputes(ctx.sql, {
         ...(state ? { state: state as 'open' } : {}),
       })
       return { status: 200, body: { disputes: disputes.map(disputeWire) } }
@@ -1329,7 +1415,7 @@ function buildRoutes(): Route[] {
       const principal = await authenticate(ctx, deps)
       requireOperator(principal)
       const state = ctx.url.searchParams.get('state')
-      const cases = await listCases(deps.sql, {
+      const cases = await listCases(ctx.sql, {
         ...(state ? { state: state as CaseState } : {}),
         ...(ctx.url.searchParams.get('subjectUrn')
           ? { subjectUrn: ctx.url.searchParams.get('subjectUrn') as string }
@@ -1383,7 +1469,7 @@ function buildRoutes(): Route[] {
     define('GET', '/v1/verifications/:urn', async (ctx, deps) => {
       const urn = ctx.params['urn']
       if (!urn) throw new NotFoundError('no such subject')
-      return { status: 200, body: { verification: await findVerification(deps.sql, decodeURIComponent(urn)) } }
+      return { status: 200, body: { verification: await findVerification(ctx.sql, decodeURIComponent(urn)) } }
     }),
 
     define('PUT', '/v1/verifications/:urn', async (ctx, deps) => {
@@ -1393,7 +1479,7 @@ function buildRoutes(): Route[] {
       if (!urn) throw new NotFoundError('no such subject')
       const body = await readJson(ctx.req)
       const level = requireEnum(body, 'level', VERIFICATION_LEVELS)
-      const verification = await setVerification(deps.sql, {
+      const verification = await setVerification(ctx.sql, {
         subjectUrn: decodeURIComponent(urn),
         level,
         ...(typeof body['evidence'] === 'object' && body['evidence'] !== null
@@ -1442,7 +1528,7 @@ async function withIdempotentRoute(
       'an Idempotency-Key header of 8 to 200 characters is required on every mutating request',
     )
   }
-  const outcome = await withIdempotency<Record<string, unknown>>(deps.sql, {
+  const outcome = await withIdempotency<Record<string, unknown>>(ctx.sql, {
     originatingService: deps.producer,
     route,
     principal: subjectOf(principal),
@@ -1483,18 +1569,19 @@ async function withIdempotentRoute(
  * is `(kind, listing)`, so a second activation of one listing finds the grant and pays nothing.
  */
 async function payListingBounty(
+  sql: Db,
   deps: ServerDeps,
   listing: Listing,
   correlationId: string,
 ): Promise<EngagementGrant | null> {
   const windowId = listing.engagementWindowId
   if (!windowId) return null
-  const window = (await listWindows(deps.sql, 50)).find((w) => w.id === windowId)
+  const window = (await listWindows(sql, 50)).find((w) => w.id === windowId)
   if (!window || window.bountyWei <= 0n) return null
-  if ((await bountiesPaid(deps.sql, windowId)) >= window.bountyMaxListings) return null
+  if ((await bountiesPaid(sql, windowId)) >= window.bountyMaxListings) return null
 
   return payGrant(
-    { sql: deps.sql, ledger: deps.orders.ledger },
+    { sql: sql, ledger: deps.orders.ledger },
     {
       windowId,
       grantKind: 'first_listing_bounty',
@@ -1518,6 +1605,7 @@ async function payListingBounty(
  * absent grant row is what records that.
  */
 async function subsidiseIfWaived(
+  sql: Db,
   deps: ServerDeps,
   listing: Listing,
   price: bigint,
@@ -1526,7 +1614,7 @@ async function subsidiseIfWaived(
 ): Promise<void> {
   if (!listing.engagementWindowId) return
   await paySettlementSubsidy(
-    { sql: deps.sql, ledger: deps.orders.ledger },
+    { sql: sql, ledger: deps.orders.ledger },
     {
       listingId: listing.id,
       windowId: listing.engagementWindowId,
@@ -1635,8 +1723,8 @@ function imageWire(image: ListingImage, studioPublicUrl: string | undefined): Re
  * wiring in `index.ts` and in every test that builds a server, all of them re-stating values that
  * are already required arguments a few fields above.
  */
-function imageDeps(deps: ServerDeps): { sql: Db; producer: string } {
-  return { sql: deps.sql, producer: deps.producer }
+function imageDeps(sql: Db, deps: ServerDeps): { sql: Db; producer: string } {
+  return { sql, producer: deps.producer }
 }
 
 /**
@@ -1652,11 +1740,11 @@ function imageDeps(deps: ServerDeps): { sql: Db; producer: string } {
  * any caller, including one that arrives by a route written later.
  */
 async function requireSeller(
-  deps: ServerDeps,
+  sql: Db,
   listingId: string,
   principal: Principal,
 ): Promise<Listing> {
-  const listing = await findListing(deps.sql, listingId)
+  const listing = await findListing(sql, listingId)
   if (!listing || listing.sellerSubject !== subjectOf(principal)) {
     throw new NotFoundError('no such listing')
   }

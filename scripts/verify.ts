@@ -24,6 +24,7 @@
  *     MARKET_TEST_DATABASE_URL=postgres://…/market_test pnpm verify
  */
 
+import { singleNetworkSql } from '../src/testsupport.ts'
 import { createServer as createHttpServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { Lifecycle } from '@cloudsforge/lifecycle'
@@ -73,7 +74,8 @@ const server = createServer({
   logger,
   metrics,
   verifier,
-  sql: db,
+  sql: singleNetworkSql(db),
+  singleNetwork: 'mainnet' as const,
   producer: 'market',
   listings: { sql: db, ledger, producer: 'market' },
   orders,
