@@ -232,7 +232,7 @@ const server = createServer({
   // bundles below are boot-time values; `forRequest` rebuilds each against this request's handle.
   sql: networkSql({
     [ownNetwork]: sql as unknown as RuntimeSql,
-    ...(sqlTestnet ? { testnet: sqlTestnet as unknown as RuntimeSql } : {}),
+    ...(sqlTestnet && ownNetwork !== 'testnet' ? { testnet: sqlTestnet as unknown as RuntimeSql } : {}),
   }),
   // The fallback for a request with no `CF-Network` header — which is EVERY service-to-service
   // call, because those go container to container and never reach the gateway that stamps one.
