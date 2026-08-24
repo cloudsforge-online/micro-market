@@ -36,6 +36,7 @@
  * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 
+import { singleNetworkSql } from './testsupport.ts'
 import { after, afterEach, before, beforeEach, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { AddressInfo } from 'node:net'
@@ -759,7 +760,8 @@ async function start(h: Harness, studioPublicUrl: string): Promise<Running> {
     logger: quietLogger(),
     metrics: registerServiceMetrics(new Metrics()),
     verifier: fakeVerifier(),
-    sql: h.sql,
+    sql: singleNetworkSql(h.sql),
+    singleNetwork: 'mainnet' as const,
     producer: 'market',
     listings: h.listings,
     orders: h.orders,
